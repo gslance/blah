@@ -1,12 +1,12 @@
 #include <blah/graphics/material.h>
-#include <blah/core/log.h>
+#include <blah/common.h>
 #include <cstring>
 
 using namespace Blah;
 
 namespace
 {
-	int calc_uniform_size(const UniformInfo& uniform)
+	int blah_calc_uniform_size(const UniformInfo& uniform)
 	{
 		int components = 0;
 
@@ -19,22 +19,12 @@ namespace
 		case UniformType::Mat3x2: components = 6; break;
 		case UniformType::Mat4x4: components = 16; break;
 		default:
-			BLAH_ERROR("Unespected Uniform Type");
+			BLAH_ASSERT(false, "Unespected Uniform Type");
 			break;
 		}
 
 		return components * uniform.array_length;
 	}
-}
-
-MaterialRef Material::create(const ShaderRef& shader)
-{
-	BLAH_ASSERT(shader, "The provided shader is invalid");
-
-	if (shader)
-		return MaterialRef(new Material(shader));
-
-	return MaterialRef();
 }
 
 Material::Material(const ShaderRef& shader)
@@ -64,13 +54,32 @@ Material::Material(const ShaderRef& shader)
 			continue;
 		}
 
-		float_size += calc_uniform_size(uniform);
+		float_size += blah_calc_uniform_size(uniform);
 	}
 
 	m_data.expand(float_size);
 }
 
-const ShaderRef Material::shader() const
+MaterialRef Material::create(const ShaderRef& shader)
+{
+	BLAH_ASSERT(shader, "The provided shader is invalid");
+
+	if (shader)
+		return MaterialRef(new Material(shader));
+
+	return MaterialRef();
+}
+
+MaterialRef Material::clone() const
+{
+	auto copy = MaterialRef(new Material(m_shader));
+	copy->m_textures = m_textures;
+	copy->m_samplers = m_samplers;
+	copy->m_data = m_data;
+	return copy;
+}
+
+ShaderRef Material::shader() const
 {
 	return m_shader;
 }
@@ -277,7 +286,7 @@ TextureSampler Material::get_sampler(int slot, int index) const
 	return TextureSampler();
 }
 
-void Material::set_value(const char* name, const float* value, int64_t length)
+void Material::set_value(const char* name, const float* value, i64 length)
 {
 	BLAH_ASSERT(m_shader, "Material Shader is invalid");
 	BLAH_ASSERT(length >= 0, "Length must be >= 0");
@@ -293,7 +302,7 @@ void Material::set_value(const char* name, const float* value, int64_t length)
 
 		if (strcmp(uniform.name, name) == 0)
 		{
-			auto max = calc_uniform_size(uniform);
+			auto max = blah_calc_uniform_size(uniform);
 			if (length > max)
 			{
 				Log::warn("Exceeding length of Uniform '%s' (%i / %i)", name, length, max);
@@ -304,14 +313,74 @@ void Material::set_value(const char* name, const float* value, int64_t length)
 			return;
 		}
 
-		offset += calc_uniform_size(uniform);
+		offset += blah_calc_uniform_size(uniform);
 		index++;
 	}
 
 	Log::warn("No Uniform '%s' exists", name);
 }
 
-const float* Material::get_value(const char* name, int64_t* length) const
+void Material::set_value(const char* name, float value)
+{
+	set_value(name, &value, 1);
+}
+
+void Material::set_value(const char* name, const Vec2f& value)
+{
+	set_value(name, &value.x, 2);
+}
+
+void Material::set_value(const char* name, const Vec3f& value)
+{
+	set_value(name, &value.x, 3);
+}
+
+void Material::set_value(const char* name, const Vec4f& value)
+{
+	set_value(name, &value.x, 4);
+}
+
+void Material::set_value(const char* name, const Mat3x2f& value)
+{
+	set_value(name, &value.m11, 6);
+}
+
+void Material::set_value(const char* name, const Mat4x4f& value)
+{
+	set_value(name, &value.m11, 16);
+}
+
+void Material::set_value(const char* name, const Vector<float>& value)
+{
+	set_value(name, value.data(), value.size());
+}
+
+void Material::set_value(const char* name, const Vector<Vec2f>& value)
+{
+	set_value(name, (float*)value.data(), value.size() * 2);
+}
+
+void Material::set_value(const char* name, const Vector<Vec3f>& value)
+{
+	set_value(name, (float*)value.data(), value.size() * 3);
+}
+
+void Material::set_value(const char* name, const Vector<Vec4f>& value)
+{
+	set_value(name, (float*)value.data(), value.size() * 4);
+}
+
+void Material::set_value(const char* name, const Vector<Mat3x2f>& value)
+{
+	set_value(name, (float*)value.data(), value.size() * 6);
+}
+
+void Material::set_value(const char* name, const Vector<Mat4x4f>& value)
+{
+	set_value(name, (float*)value.data(), value.size() * 16);
+}
+
+const float* Material::get_value(const char* name, i64* length) const
 {
 	BLAH_ASSERT(m_shader, "Material Shader is invalid");
 
@@ -327,17 +396,31 @@ const float* Material::get_value(const char* name, int64_t* length) const
 		if (strcmp(uniform.name, name) == 0)
 		{
 			if (length != nullptr)
-				*length = calc_uniform_size(uniform);
+				*length = blah_calc_uniform_size(uniform);
 			return m_data.begin() + offset;
 		}
 
 		index++;
-		offset += calc_uniform_size(uniform);
+		offset += blah_calc_uniform_size(uniform);
 	}
 
+	Log::warn("No Uniform '%s' exists", name);
 	*length = 0;
 	return nullptr;
-	Log::warn("No Uniform '%s' exists", name);
+}
+
+bool Material::has_value(const char* name) const
+{
+	BLAH_ASSERT(m_shader, "Material Shader is invalid");
+	
+	if (name != nullptr && name[0] != '\0')
+	{
+		for (auto& uniform : m_shader->uniforms())
+			if (strcmp(uniform.name, name) == 0)
+				return true;
+	}
+
+	return false;
 }
 
 const Vector<TextureRef>& Material::textures() const

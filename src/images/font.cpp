@@ -1,7 +1,7 @@
 #include <blah/images/font.h>
 #include <blah/streams/filestream.h>
-#include <blah/math/calc.h>
-#include <blah/core/log.h>
+#include <blah/numerics/calc.h>
+#include <blah/common.h>
 
 using namespace Blah;
 
@@ -9,24 +9,27 @@ using namespace Blah;
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "../third_party/stb_truetype.h"
 
-String GetName(stbtt_fontinfo* font, int nameId)
+namespace
 {
-	int length = 0;
+	String get_font_name(stbtt_fontinfo* font, int nameId)
+	{
+		int length = 0;
 
-	// get the name
-	const uint16_t* ptr = (const uint16_t*)stbtt_GetFontNameStr(font, &length,
-		STBTT_PLATFORM_ID_MICROSOFT,
-		STBTT_MS_EID_UNICODE_BMP,
-		STBTT_MS_LANG_ENGLISH,
-		nameId);
+		// get the name
+		const u16* ptr = (const u16*)stbtt_GetFontNameStr(font, &length,
+			STBTT_PLATFORM_ID_MICROSOFT,
+			STBTT_MS_EID_UNICODE_BMP,
+			STBTT_MS_LANG_ENGLISH,
+			nameId);
 
-	// we want the size in wide chars
-	length /= 2;
+		// we want the size in wide chars
+		length /= 2;
 
-	String str;
-	if (length > 0)
-		str.append_utf16(ptr, ptr + length, Calc::is_little_endian());
-	return str;
+		String str;
+		if (length > 0)
+			str.append_utf16(ptr, ptr + length, Calc::is_little_endian());
+		return str;
+	}
 }
 
 Font::Font()
@@ -44,9 +47,9 @@ Font::Font(Stream& stream) : Font()
 	load(stream);
 }
 
-Font::Font(const char* path) : Font()
+Font::Font(const FilePath& path) : Font()
 {
-	FileStream fs(path, FileMode::Read);
+	FileStream fs(path, FileMode::OpenRead);
 	if (fs.is_readable())
 		load(fs);
 }
@@ -99,7 +102,7 @@ void Font::load(Stream& stream)
 
 	if (!stream.is_readable())
 	{
-		BLAH_ERROR("Unable to load a font as the Stream was not readable");
+		BLAH_ASSERT(false, "Unable to load a font as the Stream was not readable");
 		return;
 	}
 
@@ -112,8 +115,8 @@ void Font::load(Stream& stream)
 	m_font = new stbtt_fontinfo();
 	auto fn = (stbtt_fontinfo*)m_font;
 	stbtt_InitFont(fn, m_data, 0);
-	m_family_name = GetName(fn, 1);
-	m_style_name = GetName(fn, 2);
+	m_family_name = get_font_name(fn, 1);
+	m_style_name = get_font_name(fn, 2);
 	
 	// properties
 	stbtt_GetFontVMetrics(fn, &m_ascent, &m_descent, &m_line_gap);
@@ -130,14 +133,14 @@ void Font::dispose()
 	m_style_name.dispose();
 }
 
-const char* Font::family_name() const
+const String& Font::family_name() const
 {
-	return m_family_name.cstr();
+	return m_family_name;
 }
 
-const char* Font::style_name() const
+const String& Font::style_name() const
 {
-	return m_style_name.cstr();
+	return m_style_name;
 }
 
 int Font::ascent() const
@@ -187,9 +190,9 @@ float Font::get_kerning(int glyph1, int glyph2, float scale) const
 	return stbtt_GetGlyphKernAdvance((stbtt_fontinfo*)m_font, glyph1, glyph2) * scale;
 }
 
-Font::Char Font::get_character(int glyph, float scale) const
+Font::Character Font::get_character(int glyph, float scale) const
 {
-	Char ch;
+	Character ch;
 
 	if (!m_font)
 		return ch;
@@ -215,13 +218,13 @@ Font::Char Font::get_character(int glyph, float scale) const
 	return ch;
 }
 
-bool Font::get_image(const Font::Char& ch, Color* pixels) const
+bool Font::get_image(const Font::Character& ch, Color* pixels) const
 {
 	if (ch.has_glyph)
 	{
 		// we actually use the image buffer as our temporary buffer, and fill the pixels out backwards after
 		// kinda weird but it works & saves creating more memory
-		unsigned char* src = (unsigned char*)pixels;
+		auto* src = (unsigned char*)pixels;
 		stbtt_MakeGlyphBitmap((stbtt_fontinfo*)m_font, src, ch.width, ch.height, ch.width, ch.scale, ch.scale, ch.glyph);
 
 		int len = ch.width * ch.height;
@@ -237,6 +240,16 @@ bool Font::get_image(const Font::Char& ch, Color* pixels) const
 	}
 
 	return false;
+}
+
+Image Font::get_image(const Font::Character& ch) const
+{
+	Image img(ch.width, ch.height);
+
+	if (get_image(ch, img.pixels))
+		return img;
+
+	return Image();
 }
 
 bool Font::is_valid() const

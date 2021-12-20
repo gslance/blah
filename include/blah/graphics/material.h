@@ -1,15 +1,17 @@
 #pragma once
+#include <blah/common.h>
 #include <blah/graphics/texture.h>
 #include <blah/graphics/shader.h>
 #include <blah/graphics/sampler.h>
 #include <blah/containers/vector.h>
-#include <memory>
+#include <blah/numerics/spatial.h>
 
 namespace Blah
 {
 	class Material;
-	typedef std::shared_ptr<Material> MaterialRef;
+	using MaterialRef = Ref<Material>;
 
+	// Materials hold values that can be assigned to a shader during rendering
 	class Material final
 	{
 	private:
@@ -29,8 +31,11 @@ namespace Blah
 		// If the Shader is invalid, it will return an invalid MaterialRef.
 		static MaterialRef create(const ShaderRef& shader);
 
+		// Clones the material and returns a new one
+		MaterialRef clone() const;
+
 		// Returns the Shader assigned to the Material.
-		const ShaderRef shader() const;
+		ShaderRef shader() const;
 
 		// Sets the texture
 		void set_texture(const char* name, const TextureRef& texture, int array_index = 0);
@@ -59,10 +64,27 @@ namespace Blah
 		// Sets the value. `length` is the total number of floats to set
 		// For example if the uniform is a float2[4], a total of 8 float values
 		// can be set.
-		void set_value(const char* name, const float* value, int64_t length);
+		void set_value(const char* name, const float* value, i64 length);
+
+		// Shorthands to more easily assign uniform values
+		void set_value(const char* name, float value);
+		void set_value(const char* name, const Vec2f& value);
+		void set_value(const char* name, const Vec3f& value);
+		void set_value(const char* name, const Vec4f& value);
+		void set_value(const char* name, const Mat3x2f& value);
+		void set_value(const char* name, const Mat4x4f& value);
+		void set_value(const char* name, const Vector<float>& value);
+		void set_value(const char* name, const Vector<Vec2f>& value);
+		void set_value(const char* name, const Vector<Vec3f>& value);
+		void set_value(const char* name, const Vector<Vec4f>& value);
+		void set_value(const char* name, const Vector<Mat3x2f>& value);
+		void set_value(const char* name, const Vector<Mat4x4f>& value);
 
 		// Gets a pointer to the values of the given Uniform, or nullptr if it doesn't exist.
-		const float* get_value(const char* name, int64_t* length = nullptr) const;
+		const float* get_value(const char* name, i64* length = nullptr) const;
+
+		// Checks if the shader attached to the material has a uniform value with the given name
+		bool has_value(const char* name) const;
 
 		// Returns the internal Texture buffer
 		const Vector<TextureRef>& textures() const;

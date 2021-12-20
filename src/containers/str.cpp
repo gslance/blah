@@ -6,13 +6,6 @@
 
 using namespace Blah;
 
-const uint16_t UTF8_LEAD_SURROGATE_MIN = 0xd800u;
-const uint16_t UTF8_LEAD_SURROGATE_MAX = 0xdbffu;
-const uint16_t UTF8_TRAIL_SURROGATE_MIN = 0xdc00u;
-const uint16_t UTF8_TRAIL_SURROGATE_MAX = 0xdfffu;
-const uint16_t UTF8_LEAD_OFFSET = UTF8_LEAD_SURROGATE_MIN - (0x10000 >> 10);
-const uint32_t UTF8_SURROGATE_OFFSET = 0x10000u - (UTF8_LEAD_SURROGATE_MIN << 10) - UTF8_TRAIL_SURROGATE_MIN;
-
 char Str::empty_buffer[1] = { '\0' };
 
 bool Str::operator==(const Str& rhs) const
@@ -51,7 +44,7 @@ void Str::reserve(int size)
 		{
 			char* local = data();
 			m_buffer = new char[m_capacity];
-			strncpy(m_buffer, local, m_local_size);
+			memcpy(m_buffer, local, m_local_size);
 			m_buffer[m_local_size] = '\0';
 		}
 		// expand from empty buffer
@@ -79,6 +72,50 @@ void Str::set_length(int len)
 	m_length = len;
 }
 
+u32 Str::utf8_at(int index) const
+{
+	u32 charcode = 0;
+	
+	int t = (unsigned char)(this->operator[](index++));
+	if (t < 128)
+		return t;
+
+	int high_bit_mask = (1 << 6) - 1;
+	int high_bit_shift = 0;
+	int total_bits = 0;
+	int other_bits = 6;
+
+	while ((t & 0xC0) == 0xC0)
+	{
+		t <<= 1;
+		t &= 0xff;
+		total_bits += 6;
+		high_bit_mask >>= 1;
+		high_bit_shift++;
+		charcode <<= other_bits;
+		charcode |= ((unsigned char)(this->operator[](index++))) & ((1 << other_bits) - 1);
+	}
+	charcode |= ((t >> high_bit_shift) & high_bit_mask) << total_bits;
+
+	return charcode;
+}
+
+int Str::utf8_length(int index) const
+{
+	auto c = this->operator[](index);
+	if ((c & 0xFE) == 0xFC)
+		return 6;
+	if ((c & 0xFC) == 0xF8)
+		return 5;
+	if ((c & 0xF8) == 0xF0)
+		return 4;
+	else if ((c & 0xF0) == 0xE0)
+		return 3;
+	else if ((c & 0xE0) == 0xC0)
+		return 2;
+	return 1;
+}
+
 Str& Str::append(char c)
 {
 	reserve(m_length + 1);
@@ -87,7 +124,7 @@ Str& Str::append(char c)
 	return *this;
 }
 
-Str& Str::append(uint32_t c)
+Str& Str::append(u32 c)
 {
 	// one octet
 	if (c < 0x80)
@@ -173,24 +210,30 @@ Str& Str::append_fmt(const char* fmt, ...)
 	return *this;
 }
 
-Str& Str::append_utf16(const uint16_t* start, const uint16_t* end, bool swapEndian)
+Str& Str::append_utf16(const u16* start, const u16* end, bool swap_endian)
 {
-	while (start != end)
+	// converts utf16 into utf8
+	// more info: https://en.wikipedia.org/wiki/UTF-16#Description
+
+	const u16 surrogate_min = 0xd800u;
+	const u16 surrogate_max = 0xdbffu;
+
+	while ((end == nullptr && *start != 0) || (end != nullptr && start != end))
 	{
-		uint16_t next = (*start++);
-		if (swapEndian)
+		u16 next = (*start++);
+		if (swap_endian)
 			next = ((next & 0xff) << 8 | ((next & 0xff00) >> 8));
 
-		uint32_t cp = 0xffff & next;
+		u32 cp = 0xffff & next;
 
-		if ((cp >= UTF8_LEAD_SURROGATE_MIN && cp <= UTF8_LEAD_SURROGATE_MAX))
+		if ((cp >= surrogate_min && cp <= surrogate_max))
 		{
 			next = (*start++);
-			if (swapEndian)
+			if (swap_endian)
 				next = ((next & 0xff) << 8 | ((next & 0xff00) >> 8));
 
-			uint32_t trail = 0xffff & next;
-			cp = (cp << 10) + trail + UTF8_SURROGATE_OFFSET;
+			u32 trail = 0xffff & next;
+			cp = (cp << 10) + trail + 0x10000u - (surrogate_min << 10) - 0xdc00u;
 		}
 
 		append(cp);
@@ -201,22 +244,29 @@ Str& Str::append_utf16(const uint16_t* start, const uint16_t* end, bool swapEndi
 
 Str& Str::trim()
 {
-	const char* s = begin();
-	const char* e = end() - 1;
+	if (m_length > 0)
+	{
+		const char* s = begin();
+		const char* e = end() - 1;
 
-	while (isspace(*s) && s != e)
-		s++;
-	while (isspace(*e) && s != e)
-		e--;
+		while (isspace(*s) && s != e)
+			s++;
+		while (isspace(*e) && s != e)
+			e--;
 
-	set(s, e + 1);
+		set(s, e + 1);
+	}
+
 	return *this;
 }
 
 bool Str::starts_with(const char* str, bool ignoreCase) const
 {
+	if (str == nullptr)
+		return m_length == 0;
+
 	int len = (int)strlen(str);
-	if (len > m_length || len <= 0)
+	if (len > m_length)
 		return false;
 
 	const char* a = data();
@@ -273,6 +323,9 @@ bool Str::contains(const char* str, bool ignoreCase) const
 
 bool Str::ends_with(const char* str, bool ignoreCase) const
 {
+	if (str == nullptr)
+		return m_length == 0;
+
 	int len = (int)strlen(str);
 	if (len > m_length || len <= 0)
 		return false;
@@ -361,12 +414,12 @@ Str& Str::replace(const Str& os, const Str& ns)
 {
 	for (int i = 0; i < m_length - os.m_length + 1; i++)
 	{
-		if (strcmp(data() + i, os.data()) == 0)
+		if (strncmp(data() + i, os.data(), os.m_length) == 0)
 		{
 			if (ns.m_length > os.m_length)
 				reserve(ns.m_length - os.m_length);
 
-			memcpy(data() + i + os.m_length, data() + i + ns.m_length, m_length - i - os.m_length);
+			memmove(data() + i + ns.m_length, data() + i + os.m_length, m_length - i - os.m_length);
 			memcpy(data() + i, ns.cstr(), ns.m_length);
 			set_length(m_length + ns.m_length - os.m_length);
 			i += os.m_length - 1;
@@ -418,12 +471,22 @@ void Str::set(const char* start, const char* end)
 	if (end == nullptr)
 		end = start + strlen(start);
 
-	// reserve
-	m_length = (int)(end - start);
-	reserve(m_length);
+	// make sure it actually contains characters
+	int len = (int)(end - start);
+	if (len <= 0)
+	{
+		clear();
+	}
+	else
+	{
+		m_length = len;
+		
+		// reserve
+		reserve(m_length);
 
-	// copy the data over
-	char* ptr = data();
-	memcpy(ptr, start, m_length);
-	ptr[m_length] = '\0';
+		// copy the data over
+		char* ptr = data();
+		memcpy(ptr, start, m_length);
+		ptr[m_length] = '\0';
+	}
 }

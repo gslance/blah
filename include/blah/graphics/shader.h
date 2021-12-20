@@ -1,7 +1,7 @@
 #pragma once
+#include <blah/common.h>
 #include <blah/containers/stackvector.h>
 #include <blah/containers/str.h>
-#include <memory>
 
 namespace Blah
 {
@@ -70,8 +70,9 @@ namespace Blah
 	};
 
 	class Shader;
-	typedef std::shared_ptr<Shader> ShaderRef;
+	using ShaderRef = Ref<Shader>;
 
+	// A shader used during Rendering
 	class Shader
 	{
 	protected:

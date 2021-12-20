@@ -1,14 +1,13 @@
 #include <blah/images/image.h>
 #include <blah/streams/stream.h>
 #include <blah/streams/filestream.h>
-#include <blah/core/log.h>
+#include <blah/common.h>
 
 using namespace Blah;
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_JPEG
 #define STBI_ONLY_PNG
-#define STBI_ONLY_BMP
 #include "../third_party/stb_image.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -16,21 +15,21 @@ using namespace Blah;
 
 namespace
 {
-	int Blah_STBI_Read(void* user, char* data, int size)
+	int blah_stbi_read(void* user, char* data, int size)
 	{
-		int64_t read = ((Stream*)user)->read(data, size);
+		i64 read = ((Stream*)user)->read(data, size);
 		return (int)read;
 	}
 
-	void Blah_STBI_Skip(void* user, int n)
+	void blah_stbi_skip(void* user, int n)
 	{
 		((Stream*)user)->seek(((Stream*)user)->position() + n);
 	}
 
-	int Blah_STBI_Eof(void* user)
+	int blaH_stbi_eof(void* user)
 	{
-		int64_t position = ((Stream*)user)->position();
-		int64_t length = ((Stream*)user)->length();
+		i64 position = ((Stream*)user)->position();
+		i64 length = ((Stream*)user)->length();
 
 		if (position >= length)
 			return 1;
@@ -38,7 +37,7 @@ namespace
 		return 0;
 	}
 
-	void Blah_STBI_Write(void* context, void* data, int size)
+	void blah_stbi_write(void* context, void* data, int size)
 	{
 		((Stream*)context)->write((char*)data, size);
 	}
@@ -59,13 +58,13 @@ Image::Image(Stream& stream)
 	from_stream(stream);
 }
 
-Image::Image(const char* file)
+Image::Image(const FilePath& file)
 {
 	width = height = 0;
 	pixels = nullptr;
 	m_stbi_ownership = false;
 
-	FileStream fs(file, FileMode::Read);
+	FileStream fs(file, FileMode::OpenRead);
 	if (fs.is_readable())
 		from_stream(fs);
 }
@@ -97,6 +96,8 @@ Image::Image(const Image& src)
 
 Image& Image::operator=(const Image& src)
 {
+    dispose();
+
 	width = src.width;
 	height = src.height;
 	m_stbi_ownership = src.m_stbi_ownership;
@@ -124,6 +125,8 @@ Image::Image(Image&& src) noexcept
 
 Image& Image::operator=(Image&& src) noexcept
 {
+	dispose();
+
 	width = src.width;
 	height = src.height;
 	pixels = src.pixels;
@@ -139,34 +142,30 @@ Image::~Image()
 	dispose();
 }
 
-void Image::from_stream(Stream& stream)
+bool Image::from_stream(Stream& stream)
 {
 	dispose();
 
 	if (!stream.is_readable())
-	{
-		BLAH_ERROR("Unable to load image as the Stream was not readable");
-		return;
-	}
+		return false;
 
 	stbi_io_callbacks callbacks;
-	callbacks.eof = Blah_STBI_Eof;
-	callbacks.read = Blah_STBI_Read;
-	callbacks.skip = Blah_STBI_Skip;
+	callbacks.eof = blaH_stbi_eof;
+	callbacks.read = blah_stbi_read;
+	callbacks.skip = blah_stbi_skip;
 
 	int x, y, comps;
-	uint8_t* data = stbi_load_from_callbacks(&callbacks, &stream, &x, &y, &comps, 4);
+	u8* data = stbi_load_from_callbacks(&callbacks, &stream, &x, &y, &comps, 4);
 
 	if (data == nullptr)
-	{
-		BLAH_ERROR("Unable to load image as the Stream's data was not a valid image");
-		return;
-	}
+		return false;
 
 	m_stbi_ownership = true;
 	pixels = (Color*)data;
 	width = x;
 	height = y;
+
+	return true;
 }
 
 void Image::dispose()
@@ -175,6 +174,7 @@ void Image::dispose()
 		stbi_image_free(pixels);
 	else
 		delete[] pixels;
+
 	pixels = nullptr;
 	width = height = 0;
 	m_stbi_ownership = false;
@@ -186,14 +186,14 @@ void Image::premultiply()
 	{
 		for (int n = 0; n < width * height; n ++)
 		{
-			pixels[n].r = (uint8_t)(pixels[n].r * pixels[n].a / 255);
-			pixels[n].g = (uint8_t)(pixels[n].g * pixels[n].a / 255);
-			pixels[n].b = (uint8_t)(pixels[n].b * pixels[n].a / 255);
+			pixels[n].r = (u8)(pixels[n].r * pixels[n].a / 255);
+			pixels[n].g = (u8)(pixels[n].g * pixels[n].a / 255);
+			pixels[n].b = (u8)(pixels[n].b * pixels[n].a / 255);
 		}
 	}
 }
 
-void Image::set_pixels(const RectI& rect, Color* data)
+void Image::set_pixels(const Recti& rect, Color* data)
 {
 	for (int y = 0; y < rect.h; y++)
 	{
@@ -203,9 +203,9 @@ void Image::set_pixels(const RectI& rect, Color* data)
 	}
 }
 
-bool Image::save_png(const char* file) const
+bool Image::save_png(const FilePath& file) const
 {
-	FileStream fs(file, FileMode::Write);
+	FileStream fs(file, FileMode::CreateWrite);
 	return save_png(fs);
 }
 
@@ -219,22 +219,16 @@ bool Image::save_png(Stream& stream) const
 		stbi_write_force_png_filter = 0;
 		stbi_write_png_compression_level = 0;
 
-		if (stbi_write_png_to_func(Blah_STBI_Write, &stream, width, height, 4, pixels, width * 4) != 0)
+		if (stbi_write_png_to_func(blah_stbi_write, &stream, width, height, 4, pixels, width * 4) != 0)
 			return true;
-		else
-			Log::error("stbi_write_png_to_func failed");
-	}
-	else
-	{
-		Log::error("Cannot save Image, the Stream is not writable");
 	}
 
 	return false;
 }
 
-bool Image::save_jpg(const char* file, int quality) const
+bool Image::save_jpg(const FilePath& file, int quality) const
 {
-	FileStream fs(file, FileMode::Write);
+	FileStream fs(file, FileMode::CreateWrite);
 	return save_jpg(fs, quality);
 }
 
@@ -256,46 +250,38 @@ bool Image::save_jpg(Stream& stream, int quality) const
 
 	if (stream.is_writable())
 	{
-		if (stbi_write_jpg_to_func(Blah_STBI_Write, &stream, width, height, 4, pixels, quality) != 0)
+		if (stbi_write_jpg_to_func(blah_stbi_write, &stream, width, height, 4, pixels, quality) != 0)
 			return true;
-		else
-			Log::error("stbi_write_jpg_to_func failed");
-	}
-	else
-	{
-		Log::error("Cannot save Image, the Stream is not writable");
 	}
 
 	return false;
 }
 
-
-
-void Image::get_pixels(Color* dest, const Point& destPos, const Point& destSize, RectI sourceRect)
+void Image::get_pixels(Color* dest, const Point& dest_pos, const Point& dest_size, Recti source_rect) const
 {
 	// can't be outside of the source image
-	if (sourceRect.x < 0) sourceRect.x = 0;
-	if (sourceRect.y < 0) sourceRect.y = 0;
-	if (sourceRect.x + sourceRect.w > width) sourceRect.w = width - sourceRect.x;
-	if (sourceRect.y + sourceRect.h > height) sourceRect.h = height - sourceRect.y;
+	if (source_rect.x < 0) source_rect.x = 0;
+	if (source_rect.y < 0) source_rect.y = 0;
+	if (source_rect.x + source_rect.w > width) source_rect.w = width - source_rect.x;
+	if (source_rect.y + source_rect.h > height) source_rect.h = height - source_rect.y;
 
 	// can't be larger than our destination
-	if (sourceRect.w > destSize.x - destPos.x)
-		sourceRect.w = destSize.x - destPos.x;
-	if (sourceRect.h > destSize.y - destPos.y)
-		sourceRect.h = destSize.y - destPos.y;
+	if (source_rect.w > dest_size.x - dest_pos.x)
+		source_rect.w = dest_size.x - dest_pos.x;
+	if (source_rect.h > dest_size.y - dest_pos.y)
+		source_rect.h = dest_size.y - dest_pos.y;
 
-	for (int y = 0; y < sourceRect.h; y++)
+	for (int y = 0; y < source_rect.h; y++)
 	{
-		int to = destPos.x + (destPos.y + y) * destSize.x;
-		int from = sourceRect.x + (sourceRect.y + y) * width;
-		memcpy(dest + to, pixels + from, sizeof(Color) * (int)sourceRect.w);
+		int to = dest_pos.x + (dest_pos.y + y) * dest_size.x;
+		int from = source_rect.x + (source_rect.y + y) * width;
+		memcpy(dest + to, pixels + from, sizeof(Color) * (int)source_rect.w);
 	}
 }
 
-Image Image::get_sub_image(const RectI& sourceRect)
+Image Image::get_sub_image(const Recti& source_rect)
 {
-	Image img(sourceRect.w, sourceRect.h);
-	get_pixels(img.pixels, Point::zero, Point(img.width, img.height), sourceRect);
+	Image img(source_rect.w, source_rect.h);
+	get_pixels(img.pixels, Point::zero, Point(img.width, img.height), source_rect);
 	return img;
 }

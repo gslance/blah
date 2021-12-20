@@ -1,12 +1,12 @@
 #include <blah/streams/memorystream.h>
-#include <string.h>
+#include <cstring>
 
 using namespace Blah;
 
 MemoryStream::MemoryStream()
 	: m_data(nullptr), m_length(0), m_position(0) {}
 
-MemoryStream::MemoryStream(char* data, int64_t length)
+MemoryStream::MemoryStream(unsigned char* data, size_t length)
 	: m_data(data), m_length(length), m_position(0) {}
 
 MemoryStream::MemoryStream(MemoryStream&& src) noexcept
@@ -28,7 +28,22 @@ MemoryStream& MemoryStream::operator=(MemoryStream&& src) noexcept
 	return *this;
 }
 
-int64_t MemoryStream::read_into(void* ptr, int64_t len)
+size_t MemoryStream::length() const
+{
+	return m_length;
+}
+
+size_t MemoryStream::position() const
+{
+	return m_position;
+}
+
+size_t MemoryStream::seek(size_t seekTo)
+{
+	return m_position = (seekTo < 0 ? 0 : (seekTo > m_length ? m_length : seekTo));
+}
+
+size_t MemoryStream::read_data(void* ptr, size_t len)
 {
 	if (len < 0 || ptr == nullptr)
 		return 0;
@@ -41,7 +56,7 @@ int64_t MemoryStream::read_into(void* ptr, int64_t len)
 	return len;
 }
 
-int64_t MemoryStream::write_from(const void* ptr, int64_t len)
+size_t MemoryStream::write_data(const void* ptr, size_t len)
 {
 	if (len < 0 || ptr == nullptr)
 		return 0;
@@ -52,4 +67,34 @@ int64_t MemoryStream::write_from(const void* ptr, int64_t len)
 	memcpy(m_data + m_position, ptr, (size_t)len);
 	m_position += len;
 	return len;
+}
+
+bool MemoryStream::is_open() const
+{
+	return m_data != nullptr;
+}
+
+bool MemoryStream::is_readable() const
+{
+	return true;
+}
+
+bool MemoryStream::is_writable() const
+{
+	return true;
+}
+
+void MemoryStream::close()
+{
+	m_data = nullptr; m_length = m_position = 0;
+}
+
+unsigned char* MemoryStream::data()
+{
+	return m_data;
+}
+
+const unsigned char* MemoryStream::data() const
+{
+	return m_data;
 }

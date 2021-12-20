@@ -1,15 +1,18 @@
 #pragma once
-#include <inttypes.h>
+#include <blah/common.h>
 #include <stdarg.h>
 #include <cstdio>
 #include <blah/containers/vector.h>
+#include <functional>
 
 namespace Blah
 {
 	template<int T>
 	class StrOf;
 	using String = StrOf<64>;
+	using FilePath = StrOf<260>;
 
+	// A simple String implementation
 	class Str
 	{
 	public:
@@ -35,12 +38,18 @@ namespace Blah
 
 		// append cstr
 		Str& operator+=(const char* rhs) { return append(rhs); }
+
+		// append char
+		Str& operator+=(const char& rhs) { return append(rhs); }
 		
 		// combine string
 		Str operator+(const Str& rhs) { Str str; str.append(*this).append(rhs); return str; }
 
 		// combine cstr
 		Str operator+(const char* rhs) { Str str; str.append(*this).append(rhs); return str; }
+
+		// combine char
+		Str operator+(const char& rhs) { Str str; str.append(*this).append(rhs); return str; }
 
 		// implicit cast to cstr
 		operator char* () { return cstr(); }
@@ -75,12 +84,20 @@ namespace Blah
 
 		// ensures the string has the given capacity
 		void reserve(int capacity);
+		
+		// Returns the unicode value at the given index.
+		// Assumes the index is a valid utf8 starting point.
+		u32 utf8_at(int index) const;
+
+		// Returns the byte-length of the utf8 character.
+		// Assumes the index is a valid utf8 starting point.
+		int utf8_length(int index) const;
 
 		// appends the given character
 		Str& append(char c);
 
 		// appends the given unicode character
-		Str& append(uint32_t c);
+		Str& append(u32 c);
 
 		// appends the given c string
 		Str& append(const char* start, const char* end = nullptr);
@@ -92,7 +109,7 @@ namespace Blah
 		Str& append_fmt(const char* fmt, ...);
 
 		// appends a utf16 string
-		Str& append_utf16(const uint16_t* start, const uint16_t* end = nullptr, bool swapEndian = false);
+		Str& append_utf16(const u16* start, const u16* end = nullptr, bool swapEndian = false);
 
 		// trims whitespace
 		Str& trim();
@@ -130,8 +147,10 @@ namespace Blah
 		// returns a substring of the string
 		String substr(int start, int end) const;
 
+		// Splits the string into a vector of strings
 		Vector<String> split(char ch) const;
 
+		// replaces all occurances of old string with the new string
 		Str& replace(const Str& old_str, const Str& new_str);
 
 		// replaces all occurances of the given character in the string
@@ -146,7 +165,7 @@ namespace Blah
 		// clears and disposes the internal string buffer
 		void dispose();
 
-		~Str()
+		virtual ~Str()
 		{
 			if (m_buffer != nullptr && m_buffer != empty_buffer)
 				delete[] m_buffer;
@@ -162,23 +181,30 @@ namespace Blah
 		}
 
 		// returns a pointer to the heap buffer or to our stack allocation
-		char* data()			 { return (m_buffer != nullptr ? m_buffer : ((char*)(this) + sizeof(Str))); }
-		const char* data() const { return (m_buffer != nullptr ? m_buffer : ((char*)(this) + sizeof(Str))); }
+		virtual char* data()			 { return m_buffer; }
 
+		// returns a pointer to the heap buffer or to our stack allocation
+		virtual const char* data() const { return m_buffer; }
+
+		// assigns the contents of the string
 		void set(const Str& str) { set(str.cstr(), str.cstr() + str.m_length); }
+
+		// assigns the contents of the string
 		void set(const char* start, const char* end = nullptr);
+
+		char* m_buffer;
 
 	private:
 		static char empty_buffer[1];
-		char*	m_buffer;
-		int		m_length;
-		int		m_capacity;
-		int		m_local_size;
+		int m_length;
+		int m_capacity;
+		int m_local_size;
 	};
 
 	// combine string
 	inline Str operator+(const Str& lhs, const Str& rhs) { Str str; str.append(lhs).append(rhs); return str; }
 
+	// A string with a local stack buffer of size T
 	template<int T>
 	class StrOf : public Str
 	{
@@ -192,9 +218,13 @@ namespace Blah
 		StrOf(const StrOf& rhs) : Str(T) { m_local_buffer[0] = '\0'; set(rhs); }
 
 		// assignment operators
-		StrOf& operator=(const char* rhs)	{ set(rhs); return *this; }
-		StrOf& operator=(const Str& rhs)	{ set(rhs); return *this; }
+		StrOf& operator=(const char* rhs)  { set(rhs); return *this; }
+		StrOf& operator=(const Str& rhs)   { set(rhs); return *this; }
 		StrOf& operator=(const StrOf& rhs) { set(rhs); return *this; }
+
+		// either return stack or heap buffer depending on which is in-use
+		char* data() override             { return m_buffer != nullptr ? m_buffer : m_local_buffer; }
+		const char* data() const override { return m_buffer != nullptr ? m_buffer : m_local_buffer; }
 
 		// creates a string from the format
 		static StrOf fmt(const char* str, ...);
@@ -226,4 +256,68 @@ namespace Blah
 
 		return str;
 	}
+
+	struct CaseInsenstiveStringHash
+	{
+		std::size_t operator()(const Blah::Str& key) const
+		{
+			std::size_t result = 2166136261U;
+
+			for (auto& it : key)
+			{
+				if (it >= 'A' && it <= 'Z')
+					result ^= (static_cast<std::size_t>(it) - 'A' + 'a');
+				else
+					result ^= static_cast<std::size_t>(it);
+				result *= 16777619U;
+			}
+
+			return result;
+		}
+	};
+
+	struct CaseInsenstiveStringCompare
+	{
+		bool operator() (const Str& lhs, const Str& rhs) const
+		{
+			return lhs.length() == rhs.length() && lhs.starts_with(rhs, true);
+		}
+	};
+}
+
+namespace std
+{
+	template <>
+	struct hash<Blah::Str>
+	{
+		std::size_t operator()(const Blah::Str& key) const
+		{
+			std::size_t result = 2166136261U;
+
+			for (auto& it : key)
+			{
+				result ^= static_cast<std::size_t>(it);
+				result *= 16777619U;
+			}
+
+			return result;
+		}
+	};
+
+	template <int T> 
+	struct hash<Blah::StrOf<T>>
+	{
+		std::size_t operator()(const Blah::StrOf<T>& key) const
+		{
+			std::size_t result = 2166136261U;
+
+			for (auto& it : key)
+			{
+				result ^= static_cast<std::size_t>(it);
+				result *= 16777619U;
+			}
+
+			return result;
+		}
+	};
 }

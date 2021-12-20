@@ -1,5 +1,5 @@
 #pragma once
-#include <blah/core/log.h>
+#include <blah/common.h>
 #include <new>
 #include <initializer_list>
 
@@ -16,7 +16,7 @@ namespace Blah
 		int m_count;
 
 	public:
-		static inline constexpr size_t MaxCapacity = Capacity;
+		static constexpr size_t capacity = Capacity;
 
 		StackVector();
 		StackVector(const std::initializer_list<T>& init);
@@ -30,7 +30,6 @@ namespace Blah
 		void clear();
 
 		int size() const;
-		constexpr int capacity() { return Capacity; }
 
 		T* expand(int amount = 1);
 		void push_back(const T& item);
@@ -98,7 +97,7 @@ namespace Blah
 		clear();
 
 		for (int i = 0; i < src.m_count; i++)
-			data()[i] = src.data()[i];
+			new (data() + i) T(std::move(src.data()[i]));
 		m_count = src.m_count;
 
 		return *this;
@@ -110,7 +109,7 @@ namespace Blah
 		clear();
 
 		for (int i = 0; i < src.m_count; i++)
-			data()[i] = std::move(src.data()[i]);
+			new (data() + i) T(std::move(src.data()[i]));
 		m_count = src.m_count;
 
 		return *this;
@@ -146,7 +145,7 @@ namespace Blah
 			return &data()[count];
 		}
 
-		return m_buffer;
+		return (T*)m_buffer;
 	}
 
 	template<class T, size_t Capacity>

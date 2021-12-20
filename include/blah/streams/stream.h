@@ -1,5 +1,5 @@
 #pragma once
-#include <inttypes.h>
+#include <blah/common.h>
 #include <blah/containers/str.h>
 #include <blah/streams/endian.h>
 #include <string.h>
@@ -16,13 +16,13 @@ namespace Blah
 		virtual ~Stream() = default;
 
 		// returns the length of the stream
-		virtual int64_t length() const = 0;
+		virtual size_t length() const = 0;
 
 		// returns the position of the stream
-		virtual int64_t position() const = 0;
+		virtual size_t position() const = 0;
 
 		// seeks the position of the stream
-		virtual int64_t seek(int64_t seek_to) = 0;
+		virtual size_t seek(size_t position) = 0;
 
 		// returns true of the stream is open
 		virtual bool is_open() const = 0;
@@ -36,52 +36,27 @@ namespace Blah
 		// closes the stream
 		virtual void close() = 0;
 
-		// pipes the contents of this tream to another stream
-		int64_t pipe(Stream& to, int64_t length);
+		// pipes the contents of this stream to another stream
+		size_t pipe(Stream& to, size_t length);
 
 		// reads the amount of bytes into the given buffer, and returns the amount read
-		int64_t read(void* buffer, int64_t length) { return read_into(buffer, length); }
+		size_t read(void* buffer, size_t length);
 
 		// reads a string. if length < 0, assumes null-terminated
-		String read_string(int length = -1)
-		{
-			String result;
+		String read_string(int length = -1);
 
-			if (length < 0)
-			{
-				char next;
-				while (read(&next, 1) && next != '\0')
-					result.append(next);
-			}
-			else
-			{
-				result.set_length(length);
-				read_into(result.cstr(), length);
-			}
-
-			return result;
-		}
-
-		String read_line()
-		{
-			String result;
-
-			char next;
-			while (read(&next, 1) && next != '\n' && next != '\0')
-				result.append(next);
-
-			return result;
-		}
+		// reads a string until a newline '\n' or null-terminator '\0' is found
+		String read_line();
 
 		// reads a number
-		template<class T>
+		template<typename T, typename = typename std::enable_if<std::is_arithmetic<T>::value, T>::type>
 		T read()
 		{
 			return read<T>(Endian::Little);
 		}
 
 		// reads a number
-		template<class T>
+		template<typename T, typename = typename std::enable_if<std::is_arithmetic<T>::value, T>::type>
 		T read(Endian endian)
 		{
 			T result;
@@ -92,33 +67,21 @@ namespace Blah
 		}
 
 		// writes the amount of bytes to the stream from the given buffer, and returns the amount written
-		int64_t write(const void* buffer, int64_t length) 
-		{ 
-			return write_from(buffer, length);
-		}
+		size_t write(const void* buffer, size_t length);
 
-		// writes a null-terminated string, and returns the amount written
-		int64_t write_cstr(const Str& string)
-		{
-			return write(string.cstr(), string.length() + 1);
-		}
-
-		// writes a null-terminated string, and returns the amount written
-		int64_t write_cstr(const char* cstr)
-		{
-			return write(cstr, strlen(cstr) + 1);
-		}
+		// writes the contents of a string to the stream
+		size_t write(const String& string);
 
 		// writes a number
-		template<class T>
-		int64_t write(const T& value)
+		template<typename T, typename = typename std::enable_if<std::is_arithmetic<T>::value, T>::type>
+		size_t write(const T& value)
 		{
 			return write<T>(value, Endian::Little);
 		}
 
 		// writes a number
-		template<class T>
-		int64_t write(const T& value, Endian endian)
+		template<typename T, typename = typename std::enable_if<std::is_arithmetic<T>::value, T>::type>
+		size_t write(const T& value, Endian endian)
 		{
 			T writing = value;
 
@@ -129,13 +92,10 @@ namespace Blah
 		}
 
 	protected:
-		// reads from the stream into the given buffer, and returns the number of bytes read
-		virtual int64_t read_into(void* buffer, int64_t length) = 0;
+		// reads the amount of bytes into the given buffer, and returns the amount read
+		virtual size_t read_data(void* buffer, size_t length) = 0;
 
-		// writes from the stream from the given buffer, and returns the number of bytes written
-		virtual int64_t write_from(const void* buffer, int64_t length) = 0;
+		// writes the amount of bytes to the stream from the given buffer, and returns the amount written
+		virtual size_t write_data(const void* buffer, size_t length) = 0;
 	};
 }
-
-#undef BLAH_SWAP_ENDIAN
-#undef BLAH_BIG_ENDIAN

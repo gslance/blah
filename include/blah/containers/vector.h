@@ -1,10 +1,12 @@
 #pragma once
-#include <blah/core/log.h>
-#include <type_traits>
+#include <blah/common.h>
+#include <initializer_list>
 #include <new>
+#include <cstring>
 
 namespace Blah
 {
+	// A lightweight Vector implementation
 	template<class T>
 	class Vector
 	{
@@ -19,6 +21,7 @@ namespace Blah
 		Vector(int capacity);
 		Vector(const Vector& src);
 		Vector(Vector&& src) noexcept;
+		Vector(std::initializer_list<T> list);
 		~Vector();
 
 		Vector& operator=(const Vector& src);
@@ -95,6 +98,17 @@ namespace Blah
 		src.m_count = 0;
 	}
 
+
+	template<class T>
+	inline Vector<T>::Vector(std::initializer_list<T> list)
+	{
+		m_buffer = nullptr;
+		m_count = m_capacity = 0;
+		reserve((int)list.size());
+		for (auto& it : list)
+			push_back(std::move(it));
+	}
+
 	template<class T>
 	inline Vector<T>::~Vector()
 	{
@@ -107,7 +121,7 @@ namespace Blah
 		clear();
 		reserve(src.m_capacity);
 		for (int i = 0; i < src.m_count; i++)
-			m_buffer[i] = src.m_buffer[i];
+			new (m_buffer + i) T(src.m_buffer[i]);
 		m_count = src.m_count;
 		return *this;
 	}
@@ -169,14 +183,21 @@ namespace Blah
 
 			T* new_buffer = (T*)::operator new (sizeof(T) * new_capacity);
 
-			for (int i = 0; i < m_count; i++)
+			if constexpr (std::is_trivially_copyable<T>())
 			{
-				if (i < new_capacity)
-					new (new_buffer + i) T(std::move(m_buffer[i]));
-				m_buffer[i].~T();
+				memcpy(new_buffer, m_buffer, m_count * sizeof(T));
+			}
+			else
+			{
+				for (int i = 0; i < m_count; i++)
+				{
+					if (i < new_capacity)
+						new (new_buffer + i) T(std::move(m_buffer[i]));
+					m_buffer[i].~T();
+				}
 			}
 
-			::operator delete (m_buffer, sizeof(T)* m_capacity);
+			::operator delete (m_buffer, sizeof(T) * m_capacity);
 
 			m_buffer = new_buffer;
 			m_capacity = new_capacity;

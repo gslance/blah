@@ -1,5 +1,5 @@
 #include <blah/images/packer.h>
-#include <blah/core/log.h>
+#include <blah/common.h>
 #include <algorithm>
 #include <cstring>
 
@@ -19,7 +19,7 @@ Packer::Packer(Packer&& src) noexcept
 	padding = src.padding;
 	m_dirty = src.m_dirty;
 	pages = std::move(src.pages);
-	entries = std::move(src.entries);
+	m_entries = std::move(src.m_entries);
 	m_buffer = std::move(src.m_buffer);
 }
 
@@ -31,7 +31,7 @@ Packer& Packer::operator=(Packer&& src) noexcept
 	padding = src.padding;
 	m_dirty = src.m_dirty;
 	pages = std::move(src.pages);
-	entries = std::move(src.entries);
+	m_entries = std::move(src.m_entries);
 	m_buffer = std::move(src.m_buffer);
 	return *this;
 }
@@ -41,56 +41,61 @@ Packer::~Packer()
 	dispose();
 }
 
-void Packer::add(uint64_t id, int width, int height, const Color* pixels)
+void Packer::add(u64 id, int width, int height, const Color* pixels)
 {
-	add_entry(id, width, height, pixels);
+	add_entry(id, width, height, pixels, Recti(0, 0, width, height));
 }
 
-void Packer::add(uint64_t id, const Image& image)
+void Packer::add(u64 id, const Image& image)
 {
-	add_entry(id, image.width, image.height, image.pixels);
+	add_entry(id, image.width, image.height, image.pixels, Recti(0, 0, image.width, image.height));
 }
 
-void Packer::add(uint64_t id, const String& path)
+void Packer::add(u64 id, const Image& image, const Recti& source)
+{
+	add_entry(id, image.width, image.height, image.pixels, source);
+}
+
+void Packer::add(u64 id, const FilePath& path)
 {
 	add(id, Image(path.cstr()));
 }
 
-void Packer::add_entry(uint64_t id, int w, int h, const Color* pixels)
+void Packer::add_entry(u64 id, int w, int h, const Color* pixels, const Recti& source)
 {
 	m_dirty = true;
 
-	Entry entry(id, RectI(0, 0, w, h));
+	Entry entry(id, Recti(0, 0, source.w, source.h));
 
 	// trim
-	int top = 0, left = 0, right = w, bottom = h;
+	int top = source.y, left = source.x, right = source.x, bottom = source.y;
 
 	// TOP:
-	for (int y = 0; y < h; y++)
-		for (int x = 0, s = y * w; x < w; x++, s++)
+	for (int y = source.y; y < source.y + source.h; y++)
+		for (int x = source.x, s = y * w; x < source.x + source.w; x++, s++)
 			if (pixels[s].a > 0)
 			{
 				top = y;
 				goto JUMP_LEFT;
 			}
 	JUMP_LEFT:
-	for (int x = 0; x < w; x++)
-		for (int y = top, s = x + y * w; y < h; y++, s += w)
+	for (int x = source.x; x < source.x + source.w; x++)
+		for (int y = top, s = x + y * w; y < source.y + source.h; y++, s += w)
 			if (pixels[s].a > 0)
 			{
 				left = x;
 				goto JUMP_RIGHT;
 			}
 	JUMP_RIGHT:
-	for (int x = w - 1; x >= left; x--)
-		for (int y = top, s = x + y * w; y < h; y++, s += w)
+	for (int x = source.x + source.w - 1; x >= left; x--)
+		for (int y = top, s = x + y * w; y < source.y + source.h; y++, s += w)
 			if (pixels[s].a > 0)
 			{
 				right = x + 1;
 				goto JUMP_BOTTOM;
 			}
 	JUMP_BOTTOM:
-	for (int y = h - 1; y >= top; y--)
+	for (int y = source.y + source.h - 1; y >= top; y--)
 		for (int x = left, s = x + y * w; x < right; x++, s++)
 			if (pixels[s].a > 0)
 			{
@@ -100,13 +105,13 @@ void Packer::add_entry(uint64_t id, int w, int h, const Color* pixels)
 	JUMP_END:;
 
 	// pixels actually exist in this source
-	if (right >= left && bottom >= top)
+	if (right > left && bottom > top)
 	{
 		entry.empty = false;
 
 		// store size
-		entry.frame.x = -left;
-		entry.frame.y = -top;
+		entry.frame.x = source.x - left;
+		entry.frame.y = source.y - top;
 		entry.packed.w = (right - left);
 		entry.packed.h = (bottom - top);
 
@@ -121,11 +126,16 @@ void Packer::add_entry(uint64_t id, int w, int h, const Color* pixels)
 		else
 		{
 			for (int i = 0; i < entry.packed.h; i++)
-				m_buffer.write((char*)(pixels + left + (top + i) * entry.frame.w), sizeof(Color) * entry.packed.w);
+				m_buffer.write((char*)(pixels + left + (top + i) * w), sizeof(Color) * entry.packed.w);
 		}
 	}
 
-	entries.push_back(entry);
+	m_entries.push_back(entry);
+}
+
+const Vector<Packer::Entry>& Packer::entries() const
+{
+	return m_entries;
 }
 
 void Packer::pack()
@@ -137,7 +147,7 @@ void Packer::pack()
 	pages.clear();
 
 	// only if we have stuff to pack
-	auto count = entries.size();
+	auto count = m_entries.size();
 	if (count > 0)
 	{
 		// get all the sources sorted largest -> smallest
@@ -146,8 +156,8 @@ void Packer::pack()
 			sources.resize(count);
 			int index = 0;
 
-			for (int i = 0; i < entries.size(); i++)
-				sources[index++] = &entries[i];
+			for (int i = 0; i < m_entries.size(); i++)
+				sources[index++] = &m_entries[i];
 
 			std::sort(sources.begin(), sources.end(), [](Packer::Entry* a, Packer::Entry* b)
 			{
@@ -158,7 +168,7 @@ void Packer::pack()
 		// make sure the largest isn't too large
 		if (sources[0]->packed.w + padding * 2 > max_size || sources[0]->packed.h + padding * 2 > max_size)
 		{
-			BLAH_ERROR("Source image is larger than max atlas size");
+			BLAH_ASSERT(false, "Source image is larger than max atlas size");
 			return;
 		}
 
@@ -178,7 +188,7 @@ void Packer::pack()
 
 			int from = packed;
 			int index = 0;
-			Node* root = nodes[index++].Reset(RectI(0, 0, sources[from]->packed.w + padding * 2 + spacing, sources[from]->packed.h + padding * 2 + spacing));
+			Node* root = nodes[index++].Reset(Recti(0, 0, sources[from]->packed.w + padding * 2 + spacing, sources[from]->packed.h + padding * 2 + spacing));
 
 			while (packed < count)
 			{
@@ -206,18 +216,18 @@ void Packer::pack()
 						// grow right
 						if (shouldGrowRight || (!shouldGrowDown && canGrowRight))
 						{
-							Node* next = nodes[index++].Reset(RectI(0, 0, root->rect.w + w, root->rect.h));
+							Node* next = nodes[index++].Reset(Recti(0, 0, root->rect.w + w, root->rect.h));
 							next->used = true;
 							next->down = root;
-							next->right = node = nodes[index++].Reset(RectI(root->rect.w, 0, w, root->rect.h));
+							next->right = node = nodes[index++].Reset(Recti(root->rect.w, 0, w, root->rect.h));
 							root = next;
 						}
 						// grow down
 						else
 						{
-							Node* next = nodes[index++].Reset(RectI(0, 0, root->rect.w, root->rect.h + h));
+							Node* next = nodes[index++].Reset(Recti(0, 0, root->rect.w, root->rect.h + h));
 							next->used = true;
-							next->down = node = nodes[index++].Reset(RectI(0, root->rect.h, root->rect.w, h));
+							next->down = node = nodes[index++].Reset(Recti(0, root->rect.h, root->rect.w, h));
 							next->right = root;
 							root = next;
 						}
@@ -230,8 +240,8 @@ void Packer::pack()
 
 				// add
 				node->used = true;
-				node->down = nodes[index++].Reset(RectI(node->rect.x, node->rect.y + h, node->rect.w, node->rect.h - h));
-				node->right = nodes[index++].Reset(RectI(node->rect.x + w, node->rect.y, node->rect.w - w, h));
+				node->down = nodes[index++].Reset(Recti(node->rect.x, node->rect.y + h, node->rect.w, node->rect.h - h));
+				node->right = nodes[index++].Reset(Recti(node->rect.x + w, node->rect.y, node->rect.w - w, h));
 
 				sources[packed]->packed.x = node->rect.x + padding;
 				sources[packed]->packed.y = node->rect.y + padding;
@@ -265,21 +275,26 @@ void Packer::pack()
 					sources[i]->page = page;
 					if (!sources[i]->empty)
 					{
-						RectI dst = sources[i]->packed;
+						Recti dst = sources[i]->packed;
 						Color* src = (Color*)(m_buffer.data() + sources[i]->memory_index);
 
 						// TODO:
 						// Optimize this?
 						if (padding > 0)
 						{
-							pages[page].set_pixels(RectI(dst.x - padding, dst.y, dst.w, dst.h), src);
-							pages[page].set_pixels(RectI(dst.x + padding, dst.y, dst.w, dst.h), src);
-							pages[page].set_pixels(RectI(dst.x, dst.y - padding, dst.w, dst.h), src);
-							pages[page].set_pixels(RectI(dst.x, dst.y + padding, dst.w, dst.h), src);
+							Image& image = pages[page];
+							for (int x = -padding; x < dst.w + padding * 2; x++)
+								for (int y = -padding; y < dst.h + padding * 2; y++)
+								{
+									int sx = (x < 0 ? 0 : (x > dst.w - 1 ? dst.w - 1 : x));
+									int sy = (y < 0 ? 0 : (y > dst.h - 1 ? dst.h - 1 : y));
+									image.pixels[dst.x + x + (dst.y + y) * image.width] = src[sx + sy * dst.w];
+								}
 						}
-
-						pages[page].set_pixels(dst, src);
-
+						else
+						{
+							pages[page].set_pixels(dst, src);
+						}
 					}
 				}
 			}
@@ -292,14 +307,14 @@ void Packer::pack()
 void Packer::clear()
 {
 	pages.clear();
-	entries.clear();
+	m_entries.clear();
 	m_dirty = false;
 }
 
 void Packer::dispose()
 {
 	pages.clear();
-	entries.clear();
+	m_entries.clear();
 	m_buffer.close();
 	max_size = 0;
 	power_of_two = 0;
@@ -324,7 +339,7 @@ Packer::Node* Packer::Node::Find(int w, int h)
 	return nullptr;
 }
 
-Packer::Node* Packer::Node::Reset(const RectI& rect)
+Packer::Node* Packer::Node::Reset(const Recti& rect)
 {
 	used = false;
 	this->rect = rect;

@@ -3,6 +3,8 @@
 
 namespace Blah
 {
+	// Buffer Stream reads and writes to an internal buffer.
+	// It will grow the capacity if it needs to while writing.
 	class BufferStream : public Stream
 	{
 	public:
@@ -12,26 +14,28 @@ namespace Blah
 		BufferStream& operator=(BufferStream&& bs) noexcept;
 		~BufferStream();
 
-		virtual int64_t length() const override { return m_length; }
-		virtual int64_t position() const override { return m_position; }
-		virtual int64_t seek(int64_t seekTo) override { return m_position = (seekTo < 0 ? 0 : (seekTo > m_length ? m_length : seekTo)); }
-		virtual bool is_open() const override { return m_buffer != nullptr; }
-		virtual bool is_readable() const override { return true; }
-		virtual bool is_writable() const override { return true; }
-		virtual void close() override;
-		void clear() { m_length = m_position = 0; }
+		size_t length() const override;
+		size_t position() const override;
+		size_t seek(size_t seekTo) override;
+		bool is_open() const override;
+		bool is_readable() const override;
+		bool is_writable() const override;
+		void close() override;
 
-		char* data() { return m_buffer; }
-		const char* data() const { return m_buffer; }
+		void resize(size_t length);
+		void clear();
+
+		char* data();
+		const char* data() const;
 
 	protected:
-		virtual int64_t read_into(void* ptr, int64_t length) override;
-		virtual int64_t write_from(const void* ptr, int64_t length) override;
+		size_t read_data(void* ptr, size_t length) override;
+		size_t write_data(const void* ptr, size_t length) override;
 
 	private:
 		char* m_buffer;
-		int64_t m_capacity;
-		int64_t m_length;
-		int64_t m_position;
+		size_t m_capacity;
+		size_t m_length;
+		size_t m_position;
 	};
 }

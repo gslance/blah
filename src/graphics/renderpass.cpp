@@ -1,6 +1,6 @@
 #include <blah/graphics/renderpass.h>
-#include <blah/core/log.h>
-#include "../internal/graphics_backend.h"
+#include <blah/common.h>
+#include "../internal/graphics.h"
 
 using namespace Blah;
 
@@ -12,8 +12,8 @@ RenderPass::RenderPass()
 	material = MaterialRef();
 	has_viewport = false;
 	has_scissor = false;
-	viewport = Rect();
-	scissor = Rect();
+	viewport = Rectf();
+	scissor = Rectf();
 	index_start = 0;
 	index_count = 0;
 	instance_count = 0;
@@ -38,7 +38,7 @@ void RenderPass::perform()
 	}
 
 	// Validate Index Count
-	int64_t index_count = pass.mesh->index_count();
+	i64 index_count = pass.mesh->index_count();
 	if (pass.index_start + pass.index_count > index_count)
 	{
 		Log::warn(
@@ -54,7 +54,7 @@ void RenderPass::perform()
 	}
 
 	// Validate Instance Count
-	int64_t instance_count = pass.mesh->instance_count();
+	i64 instance_count = pass.mesh->instance_count();
 	if (pass.instance_count > instance_count)
 	{
 		Log::warn(
@@ -66,11 +66,7 @@ void RenderPass::perform()
 	}
 
 	// get the total drawable size
-	Vec2 draw_size;
-	if (!pass.target)
-		draw_size = Vec2(App::draw_width(), App::draw_height());
-	else
-		draw_size = Vec2(pass.target->width(), pass.target->height());
+	auto draw_size = Vec2f(pass.target->width(), pass.target->height());
 
 	// Validate Viewport
 	if (!pass.has_viewport)
@@ -82,13 +78,13 @@ void RenderPass::perform()
 	}
 	else
 	{
-		pass.viewport = pass.viewport.overlap_rect(Rect(0, 0, draw_size.x, draw_size.y));
+		pass.viewport = pass.viewport.overlap_rect(Rectf(0, 0, draw_size.x, draw_size.y));
 	}
 
 	// Validate Scissor
 	if (pass.has_scissor)
-		pass.scissor = pass.scissor.overlap_rect(Rect(0, 0, draw_size.x, draw_size.y));
+		pass.scissor = pass.scissor.overlap_rect(Rectf(0, 0, draw_size.x, draw_size.y));
 
 	// perform render
-	GraphicsBackend::render(pass);
+	Graphics::render(pass);
 }
