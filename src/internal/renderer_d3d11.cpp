@@ -1,9 +1,10 @@
-#ifdef BLAH_GRAPHICS_D3D11
+#ifdef BLAH_RENDERER_D3D11
 
 // TODO:
 // Note the D3D11 Implementation is still a work-in-progress
 
-#include "graphics.h"
+#include "renderer.h"
+#include "internal.h"
 #include "platform.h"
 #include <blah/common.h>
 #include <cstdio>
@@ -15,12 +16,73 @@
 #include <d3d11.h>
 #include <d3dcompiler.h>
 
+// shorthand to our internal state
+#define renderer ((Renderer_D3D11*)App::Internal::renderer)
+
 namespace Blah
 {
+	const char* d3d11_batch_shader = ""
+		"cbuffer constants : register(b0)\n"
+		"{\n"
+		"	row_major float4x4 u_matrix;\n"
+		"}\n"
+
+		"struct vs_in\n"
+		"{\n"
+		"	float2 position : POS;\n"
+		"	float2 texcoord : TEX;\n"
+		"	float4 color : COL;\n"
+		"	float4 mask : MASK;\n"
+		"};\n"
+
+		"struct vs_out\n"
+		"{\n"
+		"	float4 position : SV_POSITION;\n"
+		"	float2 texcoord : TEX;\n"
+		"	float4 color : COL;\n"
+		"	float4 mask : MASK;\n"
+		"};\n"
+
+		"Texture2D    u_texture : register(t0);\n"
+		"SamplerState u_texture_sampler : register(s0);\n"
+
+		"vs_out vs_main(vs_in input)\n"
+		"{\n"
+		"	vs_out output;\n"
+
+		"	output.position = mul(float4(input.position, 0.0f, 1.0f), u_matrix);\n"
+		"	output.texcoord = input.texcoord;\n"
+		"	output.color = input.color;\n"
+		"	output.mask = input.mask;\n"
+
+		"	return output;\n"
+		"}\n"
+
+		"float4 ps_main(vs_out input) : SV_TARGET\n"
+		"{\n"
+		"	float4 color = u_texture.Sample(u_texture_sampler, input.texcoord);\n"
+		"	return\n"
+		"		input.mask.x * color * input.color + \n"
+		"		input.mask.y * color.a * input.color + \n"
+		"		input.mask.z * input.color;\n"
+		"}\n";
+
+	const ShaderData d3d11_batch_shader_data = {
+		d3d11_batch_shader,
+		d3d11_batch_shader,
+		{
+			{ "POS", 0 },
+			{ "TEX", 0 },
+			{ "COL", 0 },
+			{ "MASK", 0 },
+		}
+	};
+
 	class D3D11_Shader;
 
-	struct D3D11
+	class Renderer_D3D11 : public Renderer
 	{
+	public:
 		// main resources
 		ID3D11Device* device = nullptr;
 		ID3D11DeviceContext* context = nullptr;
@@ -28,11 +90,9 @@ namespace Blah
 		ID3D11RenderTargetView* backbuffer_view = nullptr;
 		ID3D11DepthStencilView* backbuffer_depth_view = nullptr;
 
-		// supported renderer features
-		RendererFeatures features;
-
 		// last backbuffer size
-		Point last_size;
+		Point drawable_size;
+		Point last_window_size;
 
 		struct StoredInputLayout
 		{
@@ -72,23 +132,31 @@ namespace Blah
 		Vector<StoredSampler> sampler_cache;
 		Vector<StoredDepthStencil> depthstencil_cache;
 
+		bool init() override;
+		void shutdown() override;
+		void update() override;
+		void before_render() override;
+		void after_render() override;
+		bool get_draw_size(int* w, int* h) override;
+		void render(const DrawCall& pass) override;
+		void clear_backbuffer(Color color, float depth, u8 stencil, ClearMask mask) override;
+		TextureRef create_texture(int width, int height, TextureFormat format) override;
+		TargetRef create_target(int width, int height, const TextureFormat* attachments, int attachment_count) override;
+		ShaderRef create_shader(const ShaderData* data) override;
+		MeshRef create_mesh() override;
+
 		ID3D11InputLayout* get_layout(D3D11_Shader* shader, const VertexFormat& format);
 		ID3D11BlendState* get_blend(const BlendMode& blend);
-		ID3D11RasterizerState* get_rasterizer(const RenderPass& pass);
+		ID3D11RasterizerState* get_rasterizer(const DrawCall& pass);
 		ID3D11SamplerState* get_sampler(const TextureSampler& sampler);
-		ID3D11DepthStencilState* get_depthstencil(const RenderPass& pass);
+		ID3D11DepthStencilState* get_depthstencil(const DrawCall& pass);
 	};
-
-	// D3D11 State
-	D3D11 state;
 
 	// Utility Methods
 	D3D11_BLEND_OP blend_op(BlendOp op);
 	D3D11_BLEND blend_factor(BlendFactor factor);
 	bool reflect_uniforms(Vector<UniformInfo>& append_uniforms_to, Vector<ID3D11Buffer*>& append_buffers_to, ID3DBlob* shader, ShaderType shader_type);
 	void apply_uniforms(D3D11_Shader* shader, const MaterialRef& material, ShaderType type);
-
-	// ~ BEGIN IMPLEMENTATION ~
 
 	class D3D11_Texture : public Texture
 	{
@@ -160,7 +228,7 @@ namespace Blah
 
 			m_dxgi_format = desc.Format;
 
-			auto hr = state.device->CreateTexture2D(&desc, NULL, &texture);
+			auto hr = renderer->device->CreateTexture2D(&desc, NULL, &texture);
 			if (!SUCCEEDED(hr))
 			{
 				if (texture)
@@ -171,7 +239,7 @@ namespace Blah
 
 			if (!is_depth_stencil)
 			{
-				hr = state.device->CreateShaderResourceView(texture, NULL, &view);
+				hr = renderer->device->CreateShaderResourceView(texture, NULL, &view);
 				if (!SUCCEEDED(hr))
 				{
 					texture->Release();
@@ -184,12 +252,12 @@ namespace Blah
 		{
 			if (texture)
 				texture->Release();
+			texture = nullptr;
 			if (staging)
 				staging->Release();
+			staging = nullptr;
 			if (view)
 				view->Release();
-			staging = nullptr;
-			texture = nullptr;
 			view = nullptr;
 		}
 
@@ -208,7 +276,7 @@ namespace Blah
 			return m_format;
 		}
 
-		void set_data(unsigned char* data) override
+		void set_data(const u8* data) override
 		{
 			// bounds
 			D3D11_BOX box;
@@ -220,7 +288,7 @@ namespace Blah
 			box.back = 1;
 
 			// set data
-			state.context->UpdateSubresource(
+			renderer->context->UpdateSubresource(
 				texture,
 				0,
 				&box,
@@ -229,7 +297,7 @@ namespace Blah
 				0);
 		}
 
-		void get_data(unsigned char* data) override
+		void get_data(u8* data) override
 		{
 			HRESULT hr;
 
@@ -249,7 +317,7 @@ namespace Blah
 				desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
 				desc.MiscFlags = 0;
 
-				hr = state.device->CreateTexture2D(&desc, NULL, &staging);
+				hr = renderer->device->CreateTexture2D(&desc, NULL, &staging);
 				if (!SUCCEEDED(hr))
 				{
 					BLAH_ASSERT(false, "Failed to create staging texture to get data");
@@ -266,7 +334,7 @@ namespace Blah
 			box.back = 1;
 
 			// copy data to staging texture
-			state.context->CopySubresourceRegion(
+			renderer->context->CopySubresourceRegion(
 				staging, 0,
 				0, 0, 0,
 				texture, 0,
@@ -274,7 +342,7 @@ namespace Blah
 
 			// get data
 			D3D11_MAPPED_SUBRESOURCE map;
-			hr = state.context->Map(staging, 0, D3D11_MAP_READ, 0, &map);
+			hr = renderer->context->Map(staging, 0, D3D11_MAP_READ, 0, &map);
 
 			if (!SUCCEEDED(hr))
 			{
@@ -287,7 +355,7 @@ namespace Blah
 			for (int y = 0; y < m_height; y++)
 				memcpy(data + y * bytes_per_row, (unsigned char*)map.pData + map.RowPitch * y, bytes_per_row);
 
-			state.context->Unmap(staging, 0);
+			renderer->context->Unmap(staging, 0);
 		}
 
 		bool is_framebuffer() const override
@@ -316,12 +384,12 @@ namespace Blah
 
 				if (attachments[i] == TextureFormat::DepthStencil)
 				{
-					state.device->CreateDepthStencilView(tex->texture, nullptr, &depth_view);
+					renderer->device->CreateDepthStencilView(tex->texture, nullptr, &depth_view);
 				}
 				else
 				{
 					ID3D11RenderTargetView* view = nullptr;
-					state.device->CreateRenderTargetView(tex->texture, nullptr, &view);
+					renderer->device->CreateRenderTargetView(tex->texture, nullptr, &view);
 					color_views.push_back(view);
 				}
 			}
@@ -332,6 +400,10 @@ namespace Blah
 			for (auto& it : color_views)
 				it->Release();
 			color_views.clear();
+
+			if (depth_view)
+				depth_view->Release();
+			depth_view = nullptr;
 		}
 
 		Attachments& textures() override
@@ -351,7 +423,7 @@ namespace Blah
 			if (((int)mask & (int)ClearMask::Color) == (int)ClearMask::Color)
 			{
 				for (int i = 0; i < color_views.size(); i++)
-					state.context->ClearRenderTargetView(color_views[i], col);
+					renderer->context->ClearRenderTargetView(color_views[i], col);
 			}
 
 			if (depth_view)
@@ -363,7 +435,7 @@ namespace Blah
 					flags |= D3D11_CLEAR_STENCIL;
 
 				if (flags != 0)
-					state.context->ClearDepthStencilView(depth_view, flags, depth, stencil);
+					renderer->context->ClearDepthStencilView(depth_view, flags, depth, stencil);
 			}
 		}
 	};
@@ -438,7 +510,7 @@ namespace Blah
 
 			// create vertex shader
 			{
-				hr = state.device->CreateVertexShader(
+				hr = renderer->device->CreateVertexShader(
 					vertex_blob->GetBufferPointer(),
 					vertex_blob->GetBufferSize(),
 					NULL,
@@ -450,7 +522,7 @@ namespace Blah
 
 			// create fragment shader
 			{
-				hr = state.device->CreatePixelShader(
+				hr = renderer->device->CreatePixelShader(
 					fragment_blob->GetBufferPointer(),
 					fragment_blob->GetBufferSize(),
 					NULL,
@@ -505,22 +577,26 @@ namespace Blah
 		{
 			if (vertex)
 				vertex->Release();
+			vertex = nullptr;
+
 			if (vertex_blob)
 				vertex_blob->Release();
+			vertex_blob = nullptr;
+
 			if (fragment)
 				fragment->Release();
+			fragment = nullptr;
+
 			if (fragment_blob)
 				fragment_blob->Release();
+			fragment_blob = nullptr;
 
 			for (auto& it : vertex_uniform_buffers)
 				it->Release();
+			vertex_uniform_buffers.clear();
 			for (auto& it : fragment_uniform_buffers)
 				it->Release();
-
-			vertex = nullptr;
-			vertex_blob = nullptr;
-			fragment = nullptr;
-			fragment_blob = nullptr;
+			fragment_uniform_buffers.clear();
 		}
 
 		Vector<UniformInfo>& uniforms() override
@@ -558,8 +634,10 @@ namespace Blah
 		{
 			if (vertex_buffer)
 				vertex_buffer->Release();
+			vertex_buffer = nullptr;
 			if (index_buffer)
 				index_buffer->Release();
+			index_buffer = nullptr;
 		}
 
 		void index_data(IndexFormat format, const void* indices, i64 count) override
@@ -597,7 +675,7 @@ namespace Blah
 					data.pSysMem = indices;
 
 					// create
-					auto hr = state.device->CreateBuffer(&desc, &data, &index_buffer);
+					auto hr = renderer->device->CreateBuffer(&desc, &data, &index_buffer);
 					BLAH_ASSERT(SUCCEEDED(hr), "Failed to update Index Data");
 				}
 			}
@@ -605,13 +683,13 @@ namespace Blah
 			{
 				D3D11_MAPPED_SUBRESOURCE map;
 
-				auto hr = state.context->Map(index_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
+				auto hr = renderer->context->Map(index_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
 				BLAH_ASSERT(SUCCEEDED(hr), "Failed to update Index Data");
 
 				if (SUCCEEDED(hr))
 				{
 					memcpy(map.pData, indices, index_stride * count);
-					state.context->Unmap(index_buffer, 0);
+					renderer->context->Unmap(index_buffer, 0);
 				}
 			}
 		}
@@ -645,7 +723,7 @@ namespace Blah
 					data.pSysMem = vertices;
 
 					// create
-					auto hr = state.device->CreateBuffer(&desc, &data, &vertex_buffer);
+					auto hr = renderer->device->CreateBuffer(&desc, &data, &vertex_buffer);
 					BLAH_ASSERT(SUCCEEDED(hr), "Failed to update Vertex Data");
 				}
 			}
@@ -653,13 +731,13 @@ namespace Blah
 			else if (vertices)
 			{
 				D3D11_MAPPED_SUBRESOURCE map;
-				auto hr = state.context->Map(vertex_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
+				auto hr = renderer->context->Map(vertex_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
 				BLAH_ASSERT(SUCCEEDED(hr), "Failed to update Vertex Data");
 
 				if (SUCCEEDED(hr))
 				{
 					memcpy(map.pData, vertices, vertex_format.stride * count);
-					state.context->Unmap(vertex_buffer, 0);
+					renderer->context->Unmap(vertex_buffer, 0);
 				}
 			}
 		}
@@ -685,10 +763,9 @@ namespace Blah
 		}
 	};
 
-	bool Graphics::init()
+	bool Renderer_D3D11::init()
 	{
-		state = D3D11();
-		state.last_size = Point(App::draw_width(), App::draw_height());
+		last_window_size = App::get_size();
 
 		// Define Swap Chain
 		DXGI_SWAP_CHAIN_DESC desc = {};
@@ -699,7 +776,7 @@ namespace Blah
 		desc.SampleDesc.Quality = 0;
 		desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
 		desc.BufferCount = 1;
-		desc.OutputWindow = (HWND)Platform::d3d11_get_hwnd();
+		desc.OutputWindow = (HWND)App::Internal::platform->d3d11_get_hwnd();
 		desc.Windowed = true;
 
 		// Creation Flags
@@ -719,21 +796,25 @@ namespace Blah
 			0,
 			D3D11_SDK_VERSION,
 			&desc,
-			&state.swap_chain,
-			&state.device,
+			&swap_chain,
+			&device,
 			&feature_level,
-			&state.context);
+			&context);
 
 		// Exit out if it's not OK
-		if (!SUCCEEDED(hr) || !state.swap_chain || !state.device || !state.context)
+		if (!SUCCEEDED(hr) || !swap_chain || !device || !context)
 			return false;
 
 		// Get the backbuffer
 		ID3D11Texture2D* frame_buffer = nullptr;
-		state.swap_chain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&frame_buffer);
+		swap_chain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&frame_buffer);
 		if (frame_buffer)
 		{
-			state.device->CreateRenderTargetView(frame_buffer, nullptr, &state.backbuffer_view);
+			D3D11_TEXTURE2D_DESC desc;
+			frame_buffer->GetDesc(&desc);
+			drawable_size = Point(desc.Width, desc.Height);
+
+			device->CreateRenderTargetView(frame_buffer, nullptr, &backbuffer_view);
 			frame_buffer->Release();
 		}
 
@@ -741,9 +822,10 @@ namespace Blah
 		// create a depth backbuffer
 
 		// Store Features
-		state.features.instancing = true;
-		state.features.max_texture_size = D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION;
-		state.features.origin_bottom_left = false;
+		info.type = RendererType::D3D11;
+		info.instancing = true;
+		info.max_texture_size = D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION;
+		info.origin_bottom_left = false;
 
 		// Print Driver Info
 		{
@@ -751,7 +833,7 @@ namespace Blah
 			IDXGIAdapter* dxgi_adapter;
 			DXGI_ADAPTER_DESC adapter_desc;
 
-			hr = state.device->QueryInterface(__uuidof(IDXGIDevice), (void**)&dxgi_device);
+			hr = device->QueryInterface(__uuidof(IDXGIDevice), (void**)&dxgi_device);
 
 			if (SUCCEEDED(hr))
 			{
@@ -759,90 +841,103 @@ namespace Blah
 				dxgi_adapter->GetDesc(&adapter_desc);
 
 				Log::info("D3D11 %ls", adapter_desc.Description);
+
+				dxgi_device->Release();
+				dxgi_adapter->Release();
 			}
 			else
+			{
 				Log::info("D3D11");
+			}
 		}
+
+		// create default sprite batch shader
+		default_batcher_shader = Shader::create(d3d11_batch_shader_data);
 
 		return true;
 	}
 
-	Renderer Graphics::renderer()
-	{
-		return Renderer::D3D11;
-	}
-
-	void Graphics::shutdown()
+	void Renderer_D3D11::shutdown()
 	{
 		// release cached objects
-		for (auto& it : state.blend_cache)
+		for (auto& it : blend_cache)
 			it.state->Release();
-		for (auto& it : state.depthstencil_cache)
+		for (auto& it : depthstencil_cache)
 			it.state->Release();
-		for (auto& it : state.layout_cache)
+		for (auto& it : layout_cache)
 			it.layout->Release();
-		for (auto& it : state.rasterizer_cache)
+		for (auto& it : rasterizer_cache)
 			it.state->Release();
-		for (auto& it : state.sampler_cache)
+		for (auto& it : sampler_cache)
 			it.state->Release();
-
-		// TODO:
-		// Do we need to release live resources? ex. Texture's that
-		// haven't been released by shutdown will still exist...
 
 		// release main devices
-		state.swap_chain->Release();
-		state.context->Release();
-		state.device->Release();
-
-		// reset state
-		state = D3D11();
+		if (backbuffer_view)
+			backbuffer_view->Release();
+		if (backbuffer_depth_view)
+			backbuffer_depth_view->Release();
+		swap_chain->Release();
+		context->ClearState();
+		context->Flush();
+		context->Release();
+		device->Release();
 	}
 
-	const RendererFeatures& Graphics::features()
+	void Renderer_D3D11::update()
 	{
-		return state.features;
+
 	}
 
-	void Graphics::update()
-	{
-	}
-
-	void Graphics::before_render()
+	void Renderer_D3D11::before_render()
 	{
 		HRESULT hr;
 
-		auto next_size = Point(App::draw_width(), App::draw_height());
-		if (state.last_size != next_size)
+		auto next_window_size = App::get_size();
+		if (last_window_size != next_window_size)
 		{
+			last_window_size = next_window_size;
+
 			// release old buffer
-			if (state.backbuffer_view)
-				state.backbuffer_view->Release();
+			if (backbuffer_view)
+				backbuffer_view->Release();
 
 			// perform resize
-			hr = state.swap_chain->ResizeBuffers(0, next_size.x, next_size.y, DXGI_FORMAT_B8G8R8A8_UNORM, 0);
+			hr = swap_chain->ResizeBuffers(0, 0, 0, DXGI_FORMAT_B8G8R8A8_UNORM, 0);
 			BLAH_ASSERT(SUCCEEDED(hr), "Failed to update Backbuffer on Resize");
-			state.last_size = next_size;
 
 			// get the new buffer
 			ID3D11Texture2D* frame_buffer = nullptr;
-			hr = state.swap_chain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&frame_buffer);
+			hr = swap_chain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&frame_buffer);
 			if (SUCCEEDED(hr) && frame_buffer)
 			{
-				hr = state.device->CreateRenderTargetView(frame_buffer, nullptr, &state.backbuffer_view);
+				// get backbuffer drawable size
+				D3D11_TEXTURE2D_DESC desc;
+				frame_buffer->GetDesc(&desc);
+				drawable_size = Point(desc.Width, desc.Height);
+
+				// create view
+				hr = device->CreateRenderTargetView(frame_buffer, nullptr, &backbuffer_view);
 				BLAH_ASSERT(SUCCEEDED(hr), "Failed to update Backbuffer on Resize");
 				frame_buffer->Release();
 			}
 		}
 	}
 
-	void Graphics::after_render()
+	bool Renderer_D3D11::get_draw_size(int* w, int* h)
 	{
-		auto hr = state.swap_chain->Present(1, 0);
+		*w = drawable_size.x;
+		*h = drawable_size.y;
+		return true;
+	}
+
+	void Renderer_D3D11::after_render()
+	{
+		auto vsync = App::get_flag(Flags::VSync);
+		auto hr = swap_chain->Present(vsync ? 1 : 0, 0);
 		BLAH_ASSERT(SUCCEEDED(hr), "Failed to Present swap chain");
 	}
 
-	TextureRef Graphics::create_texture(int width, int height, TextureFormat format)
+	TextureRef Renderer_D3D11::create_texture(int width, int height, TextureFormat format)
 	{
 		auto result = new D3D11_Texture(width, height, format, false);
 
@@ -853,12 +948,12 @@ namespace Blah
 		return TextureRef();
 	}
 
-	TargetRef Graphics::create_target(int width, int height, const TextureFormat* attachments, int attachment_count)
+	TargetRef Renderer_D3D11::create_target(int width, int height, const TextureFormat* attachments, int attachment_count)
 	{
 		return TargetRef(new D3D11_Target(width, height, attachments, attachment_count));
 	}
 
-	ShaderRef Graphics::create_shader(const ShaderData* data)
+	ShaderRef Renderer_D3D11::create_shader(const ShaderData* data)
 	{
 		auto result = new D3D11_Shader(data);
 		if (result->valid)
@@ -868,23 +963,23 @@ namespace Blah
 		return ShaderRef();
 	}
 
-	MeshRef Graphics::create_mesh()
+	MeshRef Renderer_D3D11::create_mesh()
 	{
 		return MeshRef(new D3D11_Mesh());
 	}
 
-	void Graphics::render(const RenderPass& pass)
+	void Renderer_D3D11::render(const DrawCall& pass)
 	{
-		auto ctx = state.context;
+		auto ctx = context;
 		auto mesh = (D3D11_Mesh*)pass.mesh.get();
 		auto shader = (D3D11_Shader*)(pass.material->shader().get());
 
 		// OM
 		{
 			// Set the Target
-			if (pass.target == App::backbuffer || !pass.target)
+			if (pass.target == App::backbuffer() || !pass.target)
 			{
-				ctx->OMSetRenderTargets(1, &state.backbuffer_view, state.backbuffer_depth_view);
+				ctx->OMSetRenderTargets(1, &backbuffer_view, backbuffer_depth_view);
 			}
 			else
 			{
@@ -894,14 +989,14 @@ namespace Blah
 
 			// Depth
 			{
-				auto depthstencil = state.get_depthstencil(pass);
+				auto depthstencil = get_depthstencil(pass);
 				if (depthstencil)
 					ctx->OMSetDepthStencilState(depthstencil, 0);
 			}
 
 			// Blend Mode
 			{
-				auto blend = state.get_blend(pass.blend);
+				auto blend = get_blend(pass.blend);
 				if (blend)
 				{
 					auto color = Color::from_rgba(pass.blend.rgba);
@@ -923,7 +1018,7 @@ namespace Blah
 			ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
 			// Assign Layout
-			auto layout = state.get_layout(shader, mesh->vertex_format);
+			auto layout = get_layout(shader, mesh->vertex_format);
 			ctx->IASetInputLayout(layout);
 
 			// Assign Vertex Buffer
@@ -937,9 +1032,6 @@ namespace Blah
 					&mesh->vertex_buffer,
 					&stride,
 					&offset);
-
-				D3D11_BUFFER_DESC desc;
-				mesh->vertex_buffer->GetDesc(&desc);
 			}
 
 			// Assign Index Buffer
@@ -985,7 +1077,7 @@ namespace Blah
 			auto& samplers = pass.material->samplers();
 			for (int i = 0; i < samplers.size(); i++)
 			{
-				auto sampler = state.get_sampler(samplers[i]);
+				auto sampler = get_sampler(samplers[i]);
 				if (sampler)
 					ctx->PSSetSamplers(i, 1, &sampler);
 			}
@@ -1019,7 +1111,7 @@ namespace Blah
 
 			// Rasterizer
 			{
-				auto rasterizer = state.get_rasterizer(pass);
+				auto rasterizer = get_rasterizer(pass);
 				if (rasterizer)
 					ctx->RSSetState(rasterizer);
 			}
@@ -1050,15 +1142,15 @@ namespace Blah
 		}
 	}
 
-	void Graphics::clear_backbuffer(Color color, float depth, u8 stencil, ClearMask mask)
+	void Renderer_D3D11::clear_backbuffer(Color color, float depth, u8 stencil, ClearMask mask)
 	{
 		if (((int)mask & (int)ClearMask::Color) == (int)ClearMask::Color)
 		{
 			float clear[4] = { color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f };
-			state.context->ClearRenderTargetView(state.backbuffer_view, clear);
+			context->ClearRenderTargetView(backbuffer_view, clear);
 		}
 
-		if (state.backbuffer_depth_view)
+		if (backbuffer_depth_view)
 		{
 			UINT flags = 0;
 			if (((int)mask & (int)ClearMask::Depth) == (int)ClearMask::Depth)
@@ -1067,7 +1159,7 @@ namespace Blah
 				flags |= D3D11_CLEAR_STENCIL;
 
 			if (flags != 0)
-				state.context->ClearDepthStencilView(state.backbuffer_depth_view, flags, depth, stencil);
+				context->ClearDepthStencilView(backbuffer_depth_view, flags, depth, stencil);
 		}
 	}
 
@@ -1133,6 +1225,7 @@ namespace Blah
 				auto uniform = append_uniforms_to.expand();
 				uniform->name = desc.Name;
 				uniform->shader = shader_type;
+				uniform->register_index = desc.BindPoint;
 				uniform->buffer_index = 0;
 				uniform->array_length = max(1, desc.BindCount);
 				uniform->type = UniformType::Texture2D;
@@ -1142,6 +1235,7 @@ namespace Blah
 				auto uniform = append_uniforms_to.expand();
 				uniform->name = desc.Name;
 				uniform->shader = shader_type;
+				uniform->register_index = desc.BindPoint;
 				uniform->buffer_index = 0;
 				uniform->array_length = max(1, desc.BindCount);
 				uniform->type = UniformType::Sampler2D;
@@ -1164,7 +1258,7 @@ namespace Blah
 				buffer_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
 
 				ID3D11Buffer* buffer;
-				state.device->CreateBuffer(&buffer_desc, nullptr, &buffer);
+				renderer->device->CreateBuffer(&buffer_desc, nullptr, &buffer);
 				append_buffers_to.push_back(buffer);
 			}
 
@@ -1183,6 +1277,7 @@ namespace Blah
 				auto uniform = append_uniforms_to.expand();
 				uniform->name = var_desc.Name;
 				uniform->shader = shader_type;
+				uniform->register_index = 0;
 				uniform->buffer_index = i;
 				uniform->array_length = max(1, type_desc.Elements);
 				uniform->type = UniformType::None;
@@ -1252,6 +1347,14 @@ namespace Blah
 
 				if (it.buffer_index == i && ((int)it.shader & (int)type) != 0)
 				{
+					// HLSL uniforms can not pass 16-byte (4-float) boundaries, therefore potentially add padding to the buffer so we align to 16 bytes
+					// For example, if we have filled in 6 floats, our remaining space will be 2. If the next value is larger than 2 floats, we will
+					// need to move to the next 16-byte (4-float) boundary (in this case 2 floats to begin at 8 floats).
+					// see: https://docs.microsoft.com/en-us/windows/win32/direct3dhlsl/dx-graphics-hlsl-packing-rules
+					int remaining = 4 - values[i].size() % 4;
+					if (remaining != 4 && remaining + length > 4)
+						values[i].expand(remaining);
+					
 					auto start = values[i].expand(length);
 					memcpy(start, data, sizeof(float) * length);
 				}
@@ -1263,14 +1366,14 @@ namespace Blah
 			if (buffers[i])
 			{
 				D3D11_MAPPED_SUBRESOURCE map;
-				state.context->Map(buffers[i], 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
+				renderer->context->Map(buffers[i], 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
 				memcpy(map.pData, values[i].begin(), values[i].size() * sizeof(float));
-				state.context->Unmap(buffers[i], 0);
+				renderer->context->Unmap(buffers[i], 0);
 			}
 		}
 	}
 
-	ID3D11InputLayout* D3D11::get_layout(D3D11_Shader* shader, const VertexFormat& format)
+	ID3D11InputLayout* Renderer_D3D11::get_layout(D3D11_Shader* shader, const VertexFormat& format)
 	{
 		// find existing
 		for (auto& it : layout_cache)
@@ -1359,7 +1462,7 @@ namespace Blah
 		return nullptr;
 	}
 
-	ID3D11BlendState* D3D11::get_blend(const BlendMode& blend)
+	ID3D11BlendState* Renderer_D3D11::get_blend(const BlendMode& blend)
 	{
 		for (auto& it : blend_cache)
 			if (it.blend == blend)
@@ -1399,7 +1502,7 @@ namespace Blah
 			desc.RenderTarget[i] = desc.RenderTarget[0];
 
 		ID3D11BlendState* blend_state = nullptr;
-		auto hr = state.device->CreateBlendState(&desc, &blend_state);
+		auto hr = renderer->device->CreateBlendState(&desc, &blend_state);
 
 		if (SUCCEEDED(hr))
 		{
@@ -1412,7 +1515,7 @@ namespace Blah
 		return nullptr;
 	}
 
-	ID3D11SamplerState* D3D11::get_sampler(const TextureSampler& sampler)
+	ID3D11SamplerState* Renderer_D3D11::get_sampler(const TextureSampler& sampler)
 	{
 		for (auto& it : sampler_cache)
 			if (it.sampler == sampler)
@@ -1447,7 +1550,7 @@ namespace Blah
 		}
 
 		ID3D11SamplerState* result;
-		auto hr = state.device->CreateSamplerState(&desc, &result);
+		auto hr = renderer->device->CreateSamplerState(&desc, &result);
 
 		if (SUCCEEDED(hr))
 		{
@@ -1460,7 +1563,7 @@ namespace Blah
 		return nullptr;
 	}
 
-	ID3D11RasterizerState* D3D11::get_rasterizer(const RenderPass& pass)
+	ID3D11RasterizerState* Renderer_D3D11::get_rasterizer(const DrawCall& pass)
 	{
 		for (auto& it : rasterizer_cache)
 			if (it.cull == pass.cull && it.has_scissor == pass.has_scissor)
@@ -1487,7 +1590,7 @@ namespace Blah
 		desc.AntialiasedLineEnable = false;
 
 		ID3D11RasterizerState* result;
-		auto hr = state.device->CreateRasterizerState(&desc, &result);
+		auto hr = renderer->device->CreateRasterizerState(&desc, &result);
 
 		if (SUCCEEDED(hr))
 		{
@@ -1501,7 +1604,7 @@ namespace Blah
 		return nullptr;
 	}
 
-	ID3D11DepthStencilState* D3D11::get_depthstencil(const RenderPass& pass)
+	ID3D11DepthStencilState* Renderer_D3D11::get_depthstencil(const DrawCall& pass)
 	{
 		for (auto& it : depthstencil_cache)
 			if (it.depth == pass.depth)
@@ -1526,7 +1629,7 @@ namespace Blah
 		}
 
 		ID3D11DepthStencilState* result;
-		auto hr = state.device->CreateDepthStencilState(&desc, &result);
+		auto hr = renderer->device->CreateDepthStencilState(&desc, &result);
 
 		if (SUCCEEDED(hr))
 		{
@@ -1540,4 +1643,17 @@ namespace Blah
 	}
 }
 
-#endif // BLAH_GRAPHICS_D3D11
+Blah::Renderer* Blah::Renderer::try_make_d3d11()
+{
+	return new Blah::Renderer_D3D11();
+}
+
+#else // BLAH_RENDERER_D3D11
+
+#include "renderer.h"
+Blah::Renderer* Blah::Renderer::try_make_d3d11()
+{
+	return nullptr;
+}
+
+#endif

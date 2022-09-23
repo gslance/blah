@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.12)
+cmake_minimum_required(VERSION 3.14)
 project(blah)
 
 # C++ version
@@ -11,36 +11,18 @@ add_library(blah
 	src/common.cpp
 	src/time.cpp
 	src/input.cpp
-
-	src/graphics/batch.cpp
-	src/graphics/blend.cpp
-	src/graphics/material.cpp
-	src/graphics/mesh.cpp
-	src/graphics/renderpass.cpp
-	src/graphics/shader.cpp
-	src/graphics/spritefont.cpp
-	src/graphics/subtexture.cpp
-	src/graphics/target.cpp
-	src/graphics/texture.cpp
-
+	src/stream.cpp
+	src/graphics.cpp
 	src/containers/str.cpp
-
+	src/drawing/batch.cpp
+	src/drawing/spritefont.cpp
+	src/drawing/subtexture.cpp
 	src/images/aseprite.cpp
 	src/images/font.cpp
 	src/images/image.cpp
 	src/images/packer.cpp
-
-	src/numerics/calc.cpp
-	src/numerics/color.cpp
-
-	src/streams/bufferstream.cpp
-	src/streams/filestream.cpp
-	src/streams/memorystream.cpp
-	src/streams/stream.cpp
-
-	src/internal/graphics_gl.cpp
-	src/internal/graphics_d3d11.cpp
-	src/internal/graphics_dummy.cpp
+	src/internal/renderer_opengl.cpp
+	src/internal/renderer_d3d11.cpp
 	src/internal/platform_sdl2.cpp
 	src/internal/platform_win32.cpp
 )
@@ -53,80 +35,76 @@ target_include_directories(blah
 )
 
 # Platform Variables
-set(PLATFORM_SDL2 true CACHE BOOL "Use SDL2 Platform Backend")
-set(PLATFORM_WIN32 false CACHE BOOL "Use Win32 Platform Backend")
-set(GRAPHICS_OPENGL true CACHE BOOL "Use OpenGL Graphics Backend")
-set(GRAPHICS_D3D11 false CACHE BOOL "Use D3D11 Graphics Backend")
+option(BLAH_PLATFORM_SDL2 "Use SDL2 Platform Backend" ON)
+option(BLAH_PLATFORM_WIN32 "Use Win32 Platform Backend" OFF)
+option(BLAH_RENDERER_OPENGL "Make OpenGL Renderer available" ON)
+if (WIN32)
+	option(BLAH_RENDERER_D3D11 "Make D3D11 Renderer available" ON)
+endif()
+option(BLAH_NO_FUNCTIONAL "Don't use std::function" OFF)
+option(BLAH_NO_SHARED_PTR "Don't use std::shared_ptr for Resources" OFF)
 
+# tracks which libraries we need to link, depends on Options above
 set(LIBS "")
 
-# use the OpenGL Graphics Backend
-if (GRAPHICS_OPENGL)
+# use the OpenGL Renderer Backend
+if (BLAH_RENDERER_OPENGL)
+	add_compile_definitions(BLAH_RENDERER_OPENGL)
+endif()
 
-	add_compile_definitions(BLAH_GRAPHICS_OPENGL)
-
-# use the D3D11 Graphics Backend
-elseif (GRAPHICS_D3D11)
-
-	add_compile_definitions(BLAH_GRAPHICS_D3D11)
+# use the D3D11 Renderer Backend
+if (BLAH_RENDERER_D3D11)
+	add_compile_definitions(BLAH_RENDERER_D3D11)
 	set(LIBS ${LIBS} d3d11.lib dxguid.lib D3Dcompiler.lib)
-
 endif()
 
 # use the SDL2 Platform Backend
 # Link and create SDL2 Definition
-if (PLATFORM_SDL2)
+if (BLAH_PLATFORM_SDL2)
 	add_compile_definitions(BLAH_PLATFORM_SDL2)
 
 	# Emscripten can import SDL2 directly
 	if (EMSCRIPTEN)
-
-		set_target_properties(blah PROPERTIES COMPILE_FLAGS "-s USE_SDL=2")
-
-	# Load SDL2 Normally
-	else()
-
-		# Try to find SDL2
-		if (DEFINED SDL2_LIBRARIES AND DEFINED SDL2_INCLUDE_DIRS)
-			set(SDL2_FOUND true)
-		else()
-			find_package(SDL2 QUIET)
-		endif()
 		
-		# If CMake cannot find SDL2 library, then it gets downloaded and compiled that way
-		if (NOT ${SDL2_FOUND})
+		set_target_properties(blah PROPERTIES COMPILE_FLAGS "-s USE_SDL=2")
+		target_link_libraries(blah "-s USE_SDL=2 -s USE_WEBGL2=1")
 
+	# Pull SDL2 from its Github repo
+	else()
+		if (NOT DEFINED BLAH_SDL2_LIBS)
 			include(FetchContent)
+			set(FETCHCONTENT_QUIET FALSE)
+
 			FetchContent_Declare(
 				SDL2
 				GIT_REPOSITORY https://github.com/libsdl-org/SDL
-				GIT_TAG release-2.0.14 # grab latest stable release
+				GIT_TAG release-2.24.0 # grab latest stable release
+				GIT_PROGRESS TRUE
 			)
-			FetchContent_GetProperties(SDL2)
-			if (NOT sdl2_POPULATED)
-				FetchContent_Populate(SDL2)
-				add_subdirectory(${sdl2_SOURCE_DIR} ${sdl2_BINARY_DIR})
-			endif()
-
-			# statically link SDL2 since we're building it ourselves
-			set(LIBS ${LIBS} SDL2main SDL2-static)
-			target_include_directories(blah PUBLIC ${sdl2_SOURCE_DIRS}/include)
-
-		else()
-
-			# Add Library and Include Dirs
-			set(LIBS ${LIBS} ${SDL2_LIBRARIES})
-			target_include_directories(blah PUBLIC ${SDL2_INCLUDE_DIRS})
-
+			FetchContent_MakeAvailable(SDL2)
+			set(BLAH_SDL2_LIBS SDL2main SDL2-static)
+			set(BLAH_SDL2_INCLUDE ${sdl2_SOURCE_DIRS}/include)
 		endif()
 
+		# statically link SDL2 since we're building it ourselves
+		set(LIBS ${LIBS} ${BLAH_SDL2_LIBS})
+		target_include_directories(blah PRIVATE ${BLAH_SDL2_INCLUDE})
 	endif()
 
 # use the Win32 Platform Backend
-elseif (PLATFORM_WIN32)
+elseif (BLAH_PLATFORM_WIN32)
 
 	add_compile_definitions(BLAH_PLATFORM_WIN32)
 
 endif()
 
-target_link_libraries(blah PUBLIC ${LIBS})
+target_link_libraries(blah PRIVATE ${LIBS})
+
+# toggle options
+if (BLAH_NO_FUNCTIONAL)
+	add_compile_definitions(BLAH_NO_FUNCTIONAL)
+endif()
+if (BLAH_NO_SHARED_PTR)
+	add_compile_definitions(BLAH_NO_SHARED_PTR)
+endif()
+

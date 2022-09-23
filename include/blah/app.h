@@ -1,103 +1,85 @@
 #pragma once
 #include <blah/common.h>
-#include <blah/numerics/spatial.h>
+#include <blah/graphics.h>
+#include <blah/math/spatial.h>
 
 namespace Blah
 {
 	// Application Event Functions
-	using AppEventFn = Func<void()>;
+	using AppEventFn = Func<void>;
 
 	// Application Logging Functions
-	using AppLogFn = Func<void(const char* message, Log::Category category)>;
+	using AppLogFn = Func<void, const char*, Log::Category>;
+
+	// Application flags
+	namespace Flags
+	{
+		constexpr u32 FixedTimestep = 1 << 0;
+		constexpr u32 VSync = 1 << 1;
+		constexpr u32 Fullscreen = 1 << 2;
+		constexpr u32 Resizable = 1 << 3;
+	}
 
 	// Application Configuration
 	struct Config
 	{
 		// Application name.
-		// This has no default and must be set.
-		const char* name;
+		const char* name = "blah";
+		
+		// Which renderer to use
+		// Default depends on the Platform
+		RendererType renderer_type = RendererType::None;
 
 		// Starting width, in pixels.
 		// Depending on the OS DPI, the true window size may be a multiple of this.
-		// This has no default and must be set.
-		int width;
+		int width = 1280;
 
 		// Starting height, in pixels.
 		// Depending on the OS DPI, the true window size may be a multiple of this.
-		// This has no default and must be set.
-		int height;
+		int height = 720;
 
 		// maximum updates to run before "giving up" and reducing frame rate.
 		// this avoids the 'spiral of death'.
 		// defaults to 5.
-		int max_updates;
+		int max_updates = 5;
 
-		// target framerate.
+		// target framerate when running with Fixed Timestep
 		// defaults to 60.
-		int target_framerate;
+		int target_framerate = 60;
+
+		// default starting flags
+		u32 flags = Flags::VSync | Flags::Resizable | Flags::FixedTimestep;
 
 		// Callback on application startup
-		// Defaults to nothing.
-		AppEventFn on_startup;
+		AppEventFn on_startup = nullptr;
 
 		// Callback on application shutdown
-		// Defaults to nothing.
-		AppEventFn on_shutdown;
+		AppEventFn on_shutdown = nullptr;
 
 		// Callback on application update
-		// Defaults to nothing.
-		AppEventFn on_update;
+		AppEventFn on_update = nullptr;
 
 		// Callback on application render
-		// Defaults to nothing.
-		AppEventFn on_render;
+		AppEventFn on_render = nullptr;
 
 		// Callback when the user has requested the application close.
 		// For example, pressing the Close button, ALT+F4, etc
 		// By default this calls `App::exit()`
-		AppEventFn on_exit_request;
+		AppEventFn on_exit_request = nullptr;
 
 		// Callback when the application logs info/warning/errors
 		// Defaults to printf.
-		AppLogFn on_log;
-
-		// Default config setup
-		Config();
+		AppLogFn on_log = nullptr;
 	};
-
-	// Renderer the Application is using
-	enum class Renderer
-	{
-		None = -1,
-		OpenGL,
-		D3D11,
-		Metal,
-		Count
-	};
-
-	// Features available on the current Renderer
-	struct RendererFeatures
-	{
-		// Whether Mesh Instancing is available
-		bool instancing = false;
-
-		// Whether the Texture origin is the bottom left.
-		// This is true for OpenGL.
-		bool origin_bottom_left = false;
-
-		// Maximum Texture Size available
-		int max_texture_size = 0;
-	};
-
-	// Forward declare Target for the BackBuffer
-	class Target;
-	using TargetRef = Ref<Target>;
 
 	// Application
 	namespace App
 	{
 		// Runs the application
 		bool run(const Config* config);
+
+		// Checks if the Application is running yet
+		bool is_running();
 
 		// Exits the application.
 		// This only signals for the application to close, it will not stop
@@ -119,47 +101,58 @@ namespace Blah
 		// Sets the Window Title
 		void set_title(const char* title);
 
-		// Gets the Window Position
+		// Gets the Window Position in Screen Coordinates
 		Point get_position();
 
-		// Sets the Window Position
+		// Sets the Window Position in Screen Coordinates
 		void set_position(Point point);
 
-		// Gets the Window Size
+		// Gets the size of the Window in Screen Coordinates.
+		// On High DPI displays this may not be 1:1 with pixels.
+		// For the size in pixels, use App::get_backbuffer_size()
 		Point get_size();
 
-		// Sets the Window Size
+		// Sets the Window Size in Screen Coordinates
 		void set_size(Point point);
 
-		// Gets the width of the window
-		int width();
-
-		// Gets the height of the window
-		int height();
-		
-		// Gets the drawable width of the window, in pixels.
-		// This may differ from the width when on platforms with High DPI Displays.
-		int draw_width();
-
-		// Gets the drawable height of the window, in pixels.
-		// This may differ from the height when on platforms with High DPI Displays.
-		int draw_height();
+		// Gets the size of the BackBuffer, in pixels
+		Point get_backbuffer_size();
 
 		// Gets the content scale based on the platform.
 		// macOS is usually 2.0, other platforms vary.
 		float content_scale();
 
-		// Toggles fullscreen if supported on the platform.
-		// Otherwise this function does nothing.
-		void fullscreen(bool enabled);
+		// If the window is currently focused or has mouse input
+		bool focused();
 
-		// Returns the Rendering API in use
-		Renderer renderer();
+		// Toggles a specific flag
+		void set_flag(u32 flag, bool enabled);
 
-		// Retrieves the Renderer Features
-		const RendererFeatures& renderer_features();
+		// Gets whether a specific flag is enabled
+		bool get_flag(u32 flag);
 
-		// Reference to the window's back buffer
-		extern const TargetRef backbuffer;
+		// Toggles the fullscreen flag
+		inline void set_fullscreen(bool enabled) { set_flag(Flags::Fullscreen, enabled); }
+
+		// Toggles the V-Sync flag
+		inline void set_vsync(bool enabled) { set_flag(Flags::VSync, enabled); }
+
+		// Toggles the resizable flag
+		inline void set_resizable(bool enabled) { set_flag(Flags::Resizable, enabled); }
+
+		// Toggles whether to update with Fixed Timestep
+		inline void set_fixedtimestep(bool enabled) { set_flag(Flags::FixedTimestep, enabled); }
+
+		// Retrieves the Renderer Information
+		const RendererInfo& renderer();
+
+		// Gets the BackBuffer
+		const TargetRef& backbuffer();
+	}
+
+	namespace System
+	{
+		// Tries to open the given URL in a web browser
+		void open_url(const char* url);
 	}
 }

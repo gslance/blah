@@ -1,134 +1,21 @@
-#include <blah/graphics/batch.h>
-#include <blah/graphics/texture.h>
-#include <blah/graphics/target.h>
-#include <blah/graphics/mesh.h>
-#include <blah/graphics/shader.h>
-#include <blah/graphics/material.h>
-#include <blah/numerics/calc.h>
+#include <blah/drawing/batch.h>
+#include <blah/math/calc.h>
 #include <blah/app.h>
-#include <cmath>
+#include "../internal/internal.h"
 
 using namespace Blah;
+
 namespace
 {
-
-	// TODO:
-	// This shader needs to be graphics API agnostic
-
-	const ShaderData opengl_shader_data = {
-		// vertex shader
-#ifdef __EMSCRIPTEN__
-		"#version 300 es\n"
-#else
-		"#version 330\n"
-#endif
-		"uniform mat4 u_matrix;\n"
-		"layout(location=0) in vec2 a_position;\n"
-		"layout(location=1) in vec2 a_tex;\n"
-		"layout(location=2) in vec4 a_color;\n"
-		"layout(location=3) in vec4 a_type;\n"
-		"out vec2 v_tex;\n"
-		"out vec4 v_col;\n"
-		"out vec4 v_type;\n"
-		"void main(void)\n"
-		"{\n"
-		"	gl_Position = u_matrix * vec4(a_position.xy, 0, 1);\n"
-		"	v_tex = a_tex;\n"
-		"	v_col = a_color;\n"
-		"	v_type = a_type;\n"
-		"}",
-
-		// fragment shader
-#ifdef __EMSCRIPTEN__
-		"#version 300 es\n"
-		"precision mediump float;\n"
-#else
-		"#version 330\n"
-#endif
-		"uniform sampler2D u_texture;\n"
-		"in vec2 v_tex;\n"
-		"in vec4 v_col;\n"
-		"in vec4 v_type;\n"
-		"out vec4 o_color;\n"
-		"void main(void)\n"
-		"{\n"
-		"	vec4 color = texture(u_texture, v_tex);\n"
-		"	o_color = \n"
-		"		v_type.x * color * v_col + \n"
-		"		v_type.y * color.a * v_col + \n"
-		"		v_type.z * v_col;\n"
-		"}"
-	};
-
-	const char* d3d11_shader = ""
-		"cbuffer constants : register(b0)\n"
-		"{\n"
-		"	row_major float4x4 u_matrix;\n"
-		"}\n"
-
-		"struct vs_in\n"
-		"{\n"
-		"	float2 position : POS;\n"
-		"	float2 texcoord : TEX;\n"
-		"	float4 color : COL;\n"
-		"	float4 mask : MASK;\n"
-		"};\n"
-
-		"struct vs_out\n"
-		"{\n"
-		"	float4 position : SV_POSITION;\n"
-		"	float2 texcoord : TEX;\n"
-		"	float4 color : COL;\n"
-		"	float4 mask : MASK;\n"
-		"};\n"
-
-		"Texture2D    u_texture : register(t0);\n"
-		"SamplerState u_texture_sampler : register(s0);\n"
-
-		"vs_out vs_main(vs_in input)\n"
-		"{\n"
-		"	vs_out output;\n"
-
-		"	output.position = mul(float4(input.position, 0.0f, 1.0f), u_matrix);\n"
-		"	output.texcoord = input.texcoord;\n"
-		"	output.color = input.color;\n"
-		"	output.mask = input.mask;\n"
-
-		"	return output;\n"
-		"}\n"
-
-		"float4 ps_main(vs_out input) : SV_TARGET\n"
-		"{\n"
-		"	float4 color = u_texture.Sample(u_texture_sampler, input.texcoord);\n"
-		"	return\n"
-		"		input.mask.x * color * input.color + \n"
-		"		input.mask.y * color.a * input.color + \n"
-		"		input.mask.z * input.color;\n"
-		"}\n";
-
-	const ShaderData d3d11_shader_data = {
-		d3d11_shader,
-		d3d11_shader,
-		{
-			{ "POS", 0 },
-			{ "TEX", 0 },
-			{ "COL", 0 },
-			{ "MASK", 0 },
-		}
-	};
-
 	const VertexFormat format = VertexFormat(
-		{
-			{ 0, VertexType::Float2, false },
-			{ 1, VertexType::Float2, false },
-			{ 2, VertexType::UByte4, true },
-			{ 3, VertexType::UByte4, true },
-		});
-}
+	{
+		{ 0, VertexType::Float2, false },
+		{ 1, VertexType::Float2, false },
+		{ 2, VertexType::UByte4, true },
+		{ 3, VertexType::UByte4, true },
+	});
 
-namespace
-{
-	static Vec2f batch_shape_intersection(const Vec2f& p0, const Vec2f& p1, const Vec2f& q0, const Vec2f& q1)
+	Vec2f batch_shape_intersection(const Vec2f& p0, const Vec2f& p1, const Vec2f& q0, const Vec2f& q1)
 	{
 		const auto aa = p1 - p0;
 		const auto bb = q0 - q1;
@@ -161,10 +48,10 @@ namespace
 		*_i++ = (u32)m_vertices.size() + 3; \
 		Vertex* _v = m_vertices.expand(4); \
 		if (integerize) { \
-			MAKE_VERTEX(_v, m_matrix, px0, py0, tx0, ty0, col0, mult, fill, wash, std::round); _v++; \
-			MAKE_VERTEX(_v, m_matrix, px1, py1, tx1, ty1, col1, mult, fill, wash, std::round); _v++; \
-			MAKE_VERTEX(_v, m_matrix, px2, py2, tx2, ty2, col2, mult, fill, wash, std::round); _v++; \
-			MAKE_VERTEX(_v, m_matrix, px3, py3, tx3, ty3, col3, mult, fill, wash, std::round); \
+			MAKE_VERTEX(_v, m_matrix, px0, py0, tx0, ty0, col0, mult, fill, wash, Calc::floor); _v++; \
+			MAKE_VERTEX(_v, m_matrix, px1, py1, tx1, ty1, col1, mult, fill, wash, Calc::floor); _v++; \
+			MAKE_VERTEX(_v, m_matrix, px2, py2, tx2, ty2, col2, mult, fill, wash, Calc::floor); _v++; \
+			MAKE_VERTEX(_v, m_matrix, px3, py3, tx3, ty3, col3, mult, fill, wash, Calc::floor); \
 		} else { \
 			MAKE_VERTEX(_v, m_matrix, px0, py0, tx0, ty0, col0, mult, fill, wash, float); _v++; \
 			MAKE_VERTEX(_v, m_matrix, px1, py1, tx1, ty1, col1, mult, fill, wash, float); _v++; \
@@ -182,9 +69,9 @@ namespace
 		*_i++ = (u32)m_vertices.size() + 2; \
 		Vertex* _v = m_vertices.expand(3); \
 		if (integerize) { \
-			MAKE_VERTEX(_v, m_matrix, px0, py0, tx0, ty0, col0, mult, fill, wash, std::floor); _v++; \
-			MAKE_VERTEX(_v, m_matrix, px1, py1, tx1, ty1, col1, mult, fill, wash, std::floor); _v++; \
-			MAKE_VERTEX(_v, m_matrix, px2, py2, tx2, ty2, col2, mult, fill, wash, std::floor); \
+			MAKE_VERTEX(_v, m_matrix, px0, py0, tx0, ty0, col0, mult, fill, wash, Calc::floor); _v++; \
+			MAKE_VERTEX(_v, m_matrix, px1, py1, tx1, ty1, col1, mult, fill, wash, Calc::floor); _v++; \
+			MAKE_VERTEX(_v, m_matrix, px2, py2, tx2, ty2, col2, mult, fill, wash, Calc::floor); \
 		} else { \
 			MAKE_VERTEX(_v, m_matrix, px0, py0, tx0, ty0, col0, mult, fill, wash, float); _v++; \
 			MAKE_VERTEX(_v, m_matrix, px1, py1, tx1, ty1, col1, mult, fill, wash, float); _v++; \
@@ -207,21 +94,6 @@ do { \
 	if (m_batch.elements > 0 && (variable) != m_batch.variable) \
 		INSERT_BATCH(); \
 	m_batch.variable = variable;
-
-ShaderRef Batch::m_default_shader;
-
-Batch::Batch()
-{
-	texture_uniform = "u_texture";
-	sampler_uniform = "u_texture_sampler";
-	matrix_uniform = "u_matrix";
-	clear();
-}
-
-Batch::~Batch()
-{
-	dispose();
-}
 
 void Batch::push_matrix(const Mat3x2f& matrix, bool absolute)
 {
@@ -356,7 +228,7 @@ void Batch::push_color_mode(ColorMode mode)
 	m_tex_wash = (m_color_mode == ColorMode::Wash ? 255 : 0);
 }
 
-ColorMode Batch::pop_color_mode()
+Batch::ColorMode Batch::pop_color_mode()
 {
 	ColorMode was = m_color_mode;
 	m_color_mode = m_color_mode_stack.pop();
@@ -365,7 +237,7 @@ ColorMode Batch::pop_color_mode()
 	return was;
 }
 
-ColorMode Batch::peek_color_mode() const
+Batch::ColorMode Batch::peek_color_mode() const
 {
 	return m_color_mode;
 }
@@ -378,7 +250,7 @@ void Batch::set_texture(const TextureRef& texture)
 	if (m_batch.texture != texture)
 	{
 		m_batch.texture = texture;
-		m_batch.flip_vertically = App::renderer_features().origin_bottom_left && texture && texture->is_framebuffer();
+		m_batch.flip_vertically = App::renderer().origin_bottom_left && texture && texture->is_framebuffer();
 	}
 }
 
@@ -392,13 +264,8 @@ void Batch::set_sampler(const TextureSampler& sampler)
 
 void Batch::render(const TargetRef& target)
 {
-	Point size;
-	if (!target)
-		size = Point(App::draw_width(), App::draw_height());
-	else
-		size = Point(target->width(), target->height());
-
-	render(target, Mat4x4f::create_ortho_offcenter(0, (float)size.x, (float)size.y, 0, 0.01f, 1000.0f));
+	TargetRef ref = (target ? target : App::backbuffer());
+	render(ref, Mat4x4f::create_ortho_offcenter(0, (float)ref->width(), (float)ref->height(), 0, 0.01f, 1000.0f));
 }
 
 void Batch::render(const TargetRef& target, const Mat4x4f& matrix)
@@ -412,23 +279,18 @@ void Batch::render(const TargetRef& target, const Mat4x4f& matrix)
 		if (!m_mesh)
 			m_mesh = Mesh::create();
 
-		if (!m_default_shader)
-		{
-			if (App::renderer() == Renderer::OpenGL)
-				m_default_shader = Shader::create(opengl_shader_data);
-			else if (App::renderer() == Renderer::D3D11)
-				m_default_shader = Shader::create(d3d11_shader_data);
-		}
-
 		if (!m_default_material)
-			m_default_material = Material::create(m_default_shader);
+		{
+			BLAH_ASSERT_RENDERER();
+			m_default_material = Material::create(App::Internal::renderer->default_batcher_shader);
+		}
 	}
 
 	// upload data
 	m_mesh->index_data(IndexFormat::UInt32, m_indices.data(), m_indices.size());
 	m_mesh->vertex_data(format, m_vertices.data(), m_vertices.size());
 
-	RenderPass pass;
+	DrawCall pass;
 	pass.target = target;
 	pass.mesh = m_mesh;
 	pass.has_viewport = false;
@@ -453,7 +315,7 @@ void Batch::render(const TargetRef& target, const Mat4x4f& matrix)
 		render_single_batch(pass, m_batch, matrix);
 }
 
-void Batch::render_single_batch(RenderPass& pass, const DrawBatch& b, const Mat4x4f& matrix)
+void Batch::render_single_batch(DrawCall& pass, const DrawBatch& b, const Mat4x4f& matrix)
 {
 	// get the material
 	pass.material = b.material;
@@ -542,8 +404,22 @@ void Batch::line(const Vec2f& from, const Vec2f& to, float t, Color fromColor, C
 	if (from.x == to.x && from.y == to.y)
 		return;
 
-	Vec2f normal = (to - from).normal();
-	Vec2f perp = Vec2f(normal.y, -normal.x);
+	Vec2f perp;
+
+	if (from.x == to.x)
+	{
+		perp = Vec2f::unit_x;
+	}
+	else if (from.y == to.y)
+	{
+		perp = Vec2f::unit_y;
+	}
+	else
+	{
+		Vec2f normal = (to - from).normal();
+		perp = Vec2f(normal.y, -normal.x);
+	}
+	
 	Vec2f pos0 = from + perp * t * 0.5f;
 	Vec2f pos1 = to + perp * t * 0.5f;
 	Vec2f pos2 = to - perp * t * 0.5f;
@@ -1076,57 +952,40 @@ void Batch::tex(const Subtexture& sub, const Rectf& clip, const Vec2f& pos, cons
 
 void Batch::str(const SpriteFont& font, const String& text, const Vec2f& pos, Color color)
 {
-	str(font, text, pos, TextAlign::TopLeft, font.size, color);
+	str(font, text, pos, Vec2f::zero, font.size, color);
 }
 
-void Batch::str(const SpriteFont& font, const String& text, const Vec2f& pos, TextAlign align, float size, Color color)
+void Batch::str(const SpriteFont& font, const String& text, const Vec2f& pos, const Vec2f& justify, float size, Color color)
 {
 	push_matrix(
 		Mat3x2f::create_scale(size / font.size) *
 		Mat3x2f::create_translation(pos)
 	);
 
-	Vec2f offset;
-
-	if ((align & TextAlign::Left) == TextAlign::Left)
-		offset.x = 0;
-	else if ((align & TextAlign::Right) == TextAlign::Right)
-		offset.x -= font.width_of_line(text);
-	else
-		offset.x -= font.width_of_line(text) * 0.5f;
-
-	if ((align & TextAlign::Top) == TextAlign::Top)
-		offset.y = font.ascent + font.descent;
-	else if ((align & TextAlign::Bottom) == TextAlign::Bottom)
-		offset.y = font.height() - font.height_of(text);
-	else
-		offset.y = (font.ascent + font.descent + font.height() - font.height_of(text)) * 0.5f;
+	Vec2f offset = Vec2f(0, font.ascent + font.descent);
+	if (justify.x != 0)
+		offset.x -= font.width_of_line(text) * justify.x;
+	if (justify.y != 0)
+		offset.y -= font.height_of(text) * justify.y;
 
 	u32 last = 0;
-	for (int i = 0, l = text.length(); i < l; i++)
+	for (int i = 0, l = text.length(); i < l; i += text.utf8_length(i))
 	{
-		if (text[i] == '\n')
+		u32 next = text.utf8_at(i);
+
+		if (next == '\n')
 		{
-			// increment y
+			offset.x = 0;
 			offset.y += font.line_height();
 
-			// re-align X for this line
-			if ((align & TextAlign::Left) == TextAlign::Left)
-				offset.x = 0;
-			else if ((align & TextAlign::Right) == TextAlign::Right)
-				offset.x = -font.width_of_line(text, i + 1);
-			else
-				offset.x = -font.width_of_line(text, i + 1) * 0.5f;
+			if (justify.x != 0)
+				offset.x -= font.width_of_line(text, i + 1) * justify.x;
 
 			last = 0;
 			continue;
 		}
 
-		// get the character
-		u32 next = text.utf8_at(i);
 		const auto& ch = font[next];
-
-		// draw it, if the subtexture exists
 		if (ch.subtexture.texture)
 		{
 			Vec2f at = offset + ch.offset;
@@ -1137,14 +996,7 @@ void Batch::str(const SpriteFont& font, const String& text, const Vec2f& pos, Te
 			tex(ch.subtexture, at, color);
 		}
 
-		// move forward
 		offset.x += ch.advance;
-
-		// increment past current character
-		// (minus 1 since the for loop iterator increments as well)
-		i += text.utf8_length(i) - 1;
-		
-		// keep last codepoint for next char for kerning
 		last = next;
 	}
 

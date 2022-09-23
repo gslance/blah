@@ -1,54 +1,35 @@
 #pragma once
-#include <blah/containers/str.h>
-#include <blah/numerics/spatial.h>
-#include <blah/numerics/color.h>
-#include <blah/graphics/subtexture.h>
-#include <blah/graphics/spritefont.h>
 #include <blah/containers/vector.h>
-#include <blah/graphics/blend.h>
-#include <blah/graphics/sampler.h>
-#include <blah/graphics/renderpass.h>
-#include <blah/app.h>
+#include <blah/containers/str.h>
+#include <blah/drawing/spritefont.h>
+#include <blah/drawing/subtexture.h>
+#include <blah/math/spatial.h>
+#include <blah/math/color.h>
+#include <blah/graphics.h>
 
 namespace Blah
 {
-	// Spritebatcher Color Mode
-	enum class ColorMode
-	{
-		// Draws textures and shapes normally
-		Normal,
-
-		// Ignores the texture color but still uses transparency, essentially
-		// drawing the "shape" of the texture a solid color
-		Wash
-	};
-
-	enum class TextAlign : char
-	{
-		Center = 0,
-		Left = 1 << 1,
-		Right = 1 << 2,
-		Top = 1 << 3,
-		Bottom = 1 << 4,
-
-		TopLeft = Top | Left,
-		TopRight = Top | Right,
-		BottomLeft = Bottom | Left,
-		BottomRight = Bottom | Right
-	};
-
-	inline TextAlign operator|(TextAlign lhs, TextAlign rhs) { return static_cast<TextAlign>(static_cast<char>(lhs) | static_cast<char>(rhs)); }
-	inline TextAlign operator&(TextAlign lhs, TextAlign rhs) { return static_cast<TextAlign>(static_cast<char>(lhs) & static_cast<char>(rhs)); }
 
 	// A 2D sprite batcher, used for drawing shapes and textures
 	class Batch
 	{
 	public:
 
+		// Spritebatcher Color Mode
+		enum class ColorMode
+		{
+			// Draws textures and shapes normally
+			Normal,
+
+			// Ignores the texture color but still uses transparency, essentially
+			// drawing the "shape" of the texture as a solid color
+			Wash
+		};
+
 		// The name of the default uniforms to set
-		const char* texture_uniform;
-		const char* sampler_uniform;
-		const char* matrix_uniform;
+		String texture_uniform = "u_texture";
+		String sampler_uniform = "u_texture_sampler";
+		String matrix_uniform = "u_matrix";
 
 		// Snaps all drawing coordinates to integer values
 		// This is useful for drawing Pixel Art stuff
@@ -56,11 +37,6 @@ namespace Blah
 
 		// Default Sampler, set on clear
 		TextureSampler default_sampler;
-
-		Batch();
-		Batch(const Batch& other) = delete;
-		Batch& operator=(const Batch& other) = delete;
-		~Batch();
 
 		// Pushes a new matrix onto the stack, and uses it for transforming all drawing.
 		// `absolute` means the matrix provided will not be transformed by the current stack.
@@ -128,7 +104,7 @@ namespace Blah
 		void set_sampler(const TextureSampler& sampler);
 
 		// Draws the batch to the given target
-		void render(const TargetRef& target = App::backbuffer);
+		void render(const TargetRef& target = TargetRef());
 
 		// Draws the batch to the given target, with the provided matrix
 		void render(const TargetRef& target, const Mat4x4f& matrix);
@@ -185,7 +161,7 @@ namespace Blah
 		void tex(const Subtexture& subtexture, const Rectf& clip, const Vec2f& pos, const Vec2f& origin, const Vec2f& scale, float rotation, Color color);
 
 		void str(const SpriteFont& font, const String& text, const Vec2f& pos, Color color);
-		void str(const SpriteFont& font, const String& text, const Vec2f& pos, TextAlign align, float size, Color color);
+		void str(const SpriteFont& font, const String& text, const Vec2f& pos, const Vec2f& justify, float size, Color color);
 
 	private:
 
@@ -199,8 +175,6 @@ namespace Blah
 			u8 wash;
 			u8 fill;
 			u8 pad;
-
-			Vertex() = default;
 		};
 
 		struct DrawBatch
@@ -224,13 +198,12 @@ namespace Blah
 				scissor(0, 0, -1, -1) {}
 		};
 
-		static ShaderRef m_default_shader;
 		MaterialRef m_default_material;
 		MeshRef m_mesh;
-		Mat3x2f m_matrix;
-		ColorMode m_color_mode;
-		u8 m_tex_mult;
-		u8 m_tex_wash;
+		Mat3x2f m_matrix = Mat3x2f::identity;
+		ColorMode m_color_mode = ColorMode::Normal;
+		u8 m_tex_mult = 255;
+		u8 m_tex_wash = 0;
 		DrawBatch m_batch;
 		Vector<Vertex> m_vertices;
 		Vector<u32> m_indices;
@@ -241,8 +214,8 @@ namespace Blah
 		Vector<ColorMode> m_color_mode_stack;
 		Vector<int> m_layer_stack;
 		Vector<DrawBatch> m_batches;
-		int m_batch_insert;
+		int m_batch_insert = 0;
 
-		void render_single_batch(RenderPass& pass, const DrawBatch& b, const Mat4x4f& matrix);
+		void render_single_batch(DrawCall& pass, const DrawBatch& b, const Mat4x4f& matrix);
 	};
 }

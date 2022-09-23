@@ -1,7 +1,6 @@
 #pragma once
-
 #include <blah/common.h>
-#include <blah/numerics/spatial.h>
+#include <blah/math/spatial.h>
 #include <blah/containers/str.h>
 #include <blah/containers/stackvector.h>
 
@@ -229,57 +228,41 @@ namespace Blah
 	}
 
 	// Keyboard Keys
-	struct Keys
+	enum class Key
 	{
-		enum Enumeration
-		{
-			#define DEFINE_KEY(name, value) name = value,
-			BLAH_KEY_DEFINITIONS
-			#undef DEFINE_KEY
-		};
+		#define DEFINE_KEY(name, value) name = value,
+		BLAH_KEY_DEFINITIONS
+		#undef DEFINE_KEY
 	};
-	using Key = Keys::Enumeration;
 
 	// Game Controller Buttons
-	struct Buttons
+	enum class Button
 	{
-		enum Enumeration
-		{
-			#define DEFINE_BTN(name, value) name = value,
-			BLAH_BUTTON_DEFINITIONS
-			#undef DEFINE_BTN
-		};
+		#define DEFINE_BTN(name, value) name = value,
+		BLAH_BUTTON_DEFINITIONS
+		#undef DEFINE_BTN
 	};
-	using Button = Buttons::Enumeration;
 
 	// Game Controller Axis
-	struct Axes
+	enum class Axis
 	{
-		enum Enumeration
-		{
-			None = -1,
-			LeftX = 0,
-			LeftY = 1,
-			RightX = 2,
-			RightY = 3,
-			LeftTrigger = 4,
-			RightTrigger = 5,
-		};
+		None = -1,
+		LeftX = 0,
+		LeftY = 1,
+		RightX = 2,
+		RightY = 3,
+		LeftTrigger = 4,
+		RightTrigger = 5,
 	};
-	using Axis = Axes::Enumeration;
 
 	// Mouse Buttons
-	struct MouseButtons
+	enum class MouseButton
 	{
-		enum Enumeration
-		{
-			None = -1,
-			Left = 0,
-			Middle = 1,
-			Right = 2,
-		};
+		None = -1,
+		Left = 0,
+		Middle = 1,
+		Right = 2,
 	};
-	using MouseButton = MouseButtons::Enumeration;
 
 	// Controller State
 	struct ControllerState
@@ -632,6 +615,9 @@ namespace Blah
 		// updates the Binding
 		void update();
 
+		// checks if the axis was pressed this frame (ie. went from 0 to -1 or 1)
+		bool pressed() const { return negative.pressed() || positive.pressed(); }
+
 		// consumes the press buffer
 		void consume_press();
 
@@ -693,6 +679,9 @@ namespace Blah
 
 		// Updates the Binding
 		void update();
+
+		// checks if the stick was pressed this frame
+		bool pressed() const { return x.pressed() || y.pressed(); }
 
 		// Consumes the Press Buffer
 		void consume_press();
@@ -781,6 +770,15 @@ namespace Blah
 		// Checks if the Left or Right Alt Key is down
 		bool alt();
 
+		// Checks if the given Controller Button is pressed
+		bool pressed(int controller_index, Button button);
+
+		// Checks if the given Controller Button is down
+		bool down(int controller_index, Button button);
+
+		// Checks if the given Controller Button is released
+		bool released(int controller_index, Button button);
+
 		// returns a string name of the key
 		const char* name_of(Key key);
 
@@ -793,13 +791,13 @@ namespace Blah
 		// sets the string contents of the clipboard
 		void set_clipboard(const String& text);
 
-		// registers a new binding
-		ButtonBindingRef register_binding(const ButtonBinding& binding);
+		// registers a new binding and returns a handle to it
+		ButtonBindingRef register_binding(const ButtonBinding& binding_data);
 
-		// registers a new axis binding
-		AxisBindingRef register_binding(const AxisBinding& binding);
+		// registers a new binding and returns a handle to it
+		AxisBindingRef register_binding(const AxisBinding& binding_data);
 
-		// registers a new stick binding
-		StickBindingRef register_binding(const StickBinding& binding);
+		// registers a new binding and returns a handle to it
+		StickBindingRef register_binding(const StickBinding& binding_data);
 	}
 }

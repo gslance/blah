@@ -1,56 +1,86 @@
 #include <blah/filesystem.h>
-#include <blah/streams/filestream.h>
-#include "internal/platform.h"
+#include "internal/internal.h"
 
 using namespace Blah;
 
 FileRef File::open(const FilePath& path, FileMode mode)
 {
-	return Platform::file_open(path.cstr(), mode);
+	BLAH_ASSERT_PLATFORM();
+
+	FileRef ref;
+	if (App::Internal::platform)
+		ref = App::Internal::platform->file_open(path.cstr(), mode);
+	if (ref)
+		ref->m_mode = mode;
+	return ref;
 }
 
 bool File::exists(const FilePath& path)
 {
-	return Platform::file_exists(path.cstr());
+	BLAH_ASSERT_PLATFORM();
+	if (App::Internal::platform)
+		return App::Internal::platform->file_exists(path.cstr());
+	return false;
 }
 
 bool File::destroy(const FilePath& path)
 {
-	return Platform::file_delete(path.cstr());
+	BLAH_ASSERT_PLATFORM();
+	if (App::Internal::platform)
+		return App::Internal::platform->file_delete(path.cstr());
+	return false;
+}
+
+FileMode File::mode() const
+{
+	return m_mode;
 }
 
 bool Directory::create(const FilePath& path)
 {
-	return Platform::dir_create(path.cstr());
+	BLAH_ASSERT_PLATFORM();
+	if (App::Internal::platform)
+		return App::Internal::platform->dir_create(path.cstr());
+	return false;
 }
 
 bool Directory::exists(const FilePath& path)
 {
-	return Platform::dir_exists(path.cstr());
+	BLAH_ASSERT_PLATFORM();
+	if (App::Internal::platform)
+		return App::Internal::platform->dir_exists(path.cstr());
+	return false;
 }
 
 bool Directory::destroy(const FilePath& path)
 {
-	return Platform::dir_delete(path.cstr());
+	BLAH_ASSERT_PLATFORM();
+	if (App::Internal::platform)
+		return App::Internal::platform->dir_delete(path.cstr());
+	return false;
 }
 
 Vector<FilePath> Directory::enumerate(const FilePath& path, bool recursive)
 {
+	BLAH_ASSERT_PLATFORM();
+
 	Vector<FilePath> list;
 
-	// get files
-	Platform::dir_enumerate(list, path.cstr(), recursive);
-
-	// normalize path names
-	for (auto& it : list)
-		it.replace('\\', '/');
+	if (App::Internal::platform)
+	{
+		App::Internal::platform->dir_enumerate(list, path.cstr(), recursive);
+		for (auto& it : list)
+			it.replace('\\', '/');
+	}
 
 	return list;
 }
 
 void Directory::explore(const FilePath& path)
 {
-	Platform::dir_explore(path);
+	BLAH_ASSERT_PLATFORM();
+	if (App::Internal::platform)
+		App::Internal::platform->dir_explore(path);
 }
 
 FilePath Path::get_file_name(const FilePath& path)
@@ -146,5 +176,10 @@ FilePath Path::normalize(const FilePath& path)
 
 FilePath Path::join(const FilePath& a, const FilePath& b)
 {
-	return normalize(FilePath(a).append("/").append(b));
+	if (a.length() <= 0)
+		return normalize(b);
+	else if (b.length() <= 0)
+		return normalize(a);
+	else
+		return normalize(FilePath(a).append("/").append(b));
 }

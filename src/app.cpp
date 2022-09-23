@@ -1,10 +1,9 @@
 #include <blah/app.h>
 #include <blah/common.h>
 #include <blah/time.h>
-#include <blah/graphics/target.h>
+#include "internal/internal.h"
 #include "internal/platform.h"
-#include "internal/graphics.h"
-#include "internal/input.h"
+#include "internal/renderer.h"
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -13,313 +12,420 @@
 
 using namespace Blah;
 
-Config::Config()
-{
-	name = nullptr;
-	width = 0;
-	height = 0;
-	target_framerate = 60;
-	max_updates = 5;
+#define BLAH_ASSERT_RUNNING() BLAH_ASSERT(app_is_running, "The App is not running (call App::run)")
 
-	on_startup = nullptr;
-	on_shutdown = nullptr;
-	on_update = nullptr;
-	on_render = nullptr;
-	on_exit_request = App::exit;
-	on_log = nullptr;
-}
+// Interal Platform Pointer
+Platform* App::Internal::platform = nullptr;
+
+// Internal Renderer Pointer
+Renderer* App::Internal::renderer = nullptr;
 
 namespace
 {
-	Config app_config;
-	bool app_is_running = false;
-	bool app_is_exiting = false;
-	u64 time_last;
-	u64 time_accumulator = 0;
+	// Global App State
+	Config     app_config;
+	bool       app_is_running = false;
+	bool       app_is_exiting = false;
+	u64        app_time_last;
+	u64        app_time_accumulator = 0;
+	u32        app_flags = 0;
+	TargetRef  app_backbuffer;
 
-	void app_iterate()
+	void get_drawable_size(int* w, int* h)
 	{
-		// update at a fixed timerate
-		// TODO: allow a non-fixed step update?
-		{
-			u64 time_target = (u64)((1.0 / app_config.target_framerate) * Time::ticks_per_second);
-			u64 time_curr = Platform::ticks();
-			u64 time_diff = time_curr - time_last;
-			time_last = time_curr;
-			time_accumulator += time_diff;
+		// Some renderer implementations might return their own size
+		if (App::Internal::renderer->get_draw_size(w, h))
+			return;
 
-			// do not let us run too fast
-			while (time_accumulator < time_target)
-			{
-				int milliseconds = (int)(time_target - time_accumulator) / (Time::ticks_per_second / 1000);
-				Platform::sleep(milliseconds);
-
-				time_curr = Platform::ticks();
-				time_diff = time_curr - time_last;
-				time_last = time_curr;
-				time_accumulator += time_diff;
-			}
-
-			// Do not allow us to fall behind too many updates
-			// (otherwise we'll get spiral of death)
-			u64 time_maximum = app_config.max_updates * time_target;
-			if (time_accumulator > time_maximum)
-				time_accumulator = time_maximum;
-
-			// do as many updates as we can
-			while (time_accumulator >= time_target)
-			{
-				time_accumulator -= time_target;
-
-				Time::delta = (1.0f / app_config.target_framerate);
-
-				if (Time::pause_timer > 0)
-				{
-					Time::pause_timer -= Time::delta;
-					if (Time::pause_timer <= -0.0001)
-						Time::delta = -Time::pause_timer;
-					else
-						continue;
-				}
-
-				Time::previous_ticks = Time::ticks;
-				Time::ticks += time_target;
-				Time::previous_seconds = Time::seconds;
-				Time::seconds += Time::delta;
-
-				Input::update_state();
-				Platform::update(Input::state);
-				Input::update_bindings();
-				Graphics::update();
-
-				if (app_config.on_update != nullptr)
-					app_config.on_update();
-			}
-		}
-
-		// render
-		{
-			Graphics::before_render();
-
-			if (app_config.on_render != nullptr)
-				app_config.on_render();
-
-			Graphics::after_render();
-			Platform::present();
-		}
+		// otherwise fallback to the platform size
+		App::Internal::platform->get_draw_size(w, h);
 	}
 
+	// A dummy Target that represents the Back Buffer.
+	// It doesn't contain any data, rather it forwards calls along to the actual BackBuffer.
+	class BackBuffer final : public Target
+	{
+	public:
+		Attachments empty_textures;
+		Attachments& textures() override { BLAH_ASSERT(false, "Backbuffer doesn't have any textures"); return empty_textures; }
+		const Attachments& textures() const override { BLAH_ASSERT(false, "Backbuffer doesn't have any textures"); return empty_textures; }
+		int width() const override { int w, h; get_drawable_size(&w, &h); return w; }
+		int height() const override { int w, h; get_drawable_size(&w, &h); return h; }
+		void clear(Color color, float depth, u8 stencil, ClearMask mask) override
+		{
+			BLAH_ASSERT_RENDERER();
+			if (App::Internal::renderer)
+				App::Internal::renderer->clear_backbuffer(color, depth, stencil, mask);
+		}
+	};
 }
 
 bool App::run(const Config* c)
 {
 	BLAH_ASSERT(!app_is_running, "The Application is already running");
+
+	// copy config over
+	app_config = *c;
+
+	// exit the application by default
+	if (!app_config.on_exit_request)
+		app_config.on_exit_request = App::exit;
+
+	// default renderer type
+	if (app_config.renderer_type == RendererType::None)
+		app_config.renderer_type = Renderer::default_type();
+
+	// exit out if setup is wrong
 	BLAH_ASSERT(c != nullptr, "The Application requires a valid Config");
 	BLAH_ASSERT(c->name != nullptr, "The Application Name cannot be null");
 	BLAH_ASSERT(c->width > 0 && c->height > 0, "The Width and Height must be larget than 0");
 	BLAH_ASSERT(c->max_updates > 0, "Max Updates must be >= 1");
 	BLAH_ASSERT(c->target_framerate > 0, "Target Framerate must be >= 1");
 
-	app_config = *c;
+	if (app_is_running || c == nullptr || c->width <= 0 || c->height <= 0 || c->max_updates <= 0 || c->target_framerate <= 0)
+	{
+		App::Internal::shutdown();
+		return false;
+	}
+
+	// default values
 	app_is_running = true;
 	app_is_exiting = false;
+	app_flags = app_config.flags;
+	app_backbuffer = TargetRef(new BackBuffer());
 
 	// initialize the system
-	if (!Platform::init(app_config))
 	{
-		Log::error("Failed to initialize Platform module");
-		return false;
+		Internal::platform = Platform::try_make_platform(app_config);
+		if (!Internal::platform)
+		{
+			Log::error("Failed to create Platform module");
+			App::Internal::shutdown();
+			return false;
+		}
+
+		if (!Internal::platform->init(app_config))
+		{
+			Log::error("Failed to initialize Platform module");
+			App::Internal::shutdown();
+			return false;
+		}
 	}
 
 	// initialize graphics
-	if (!Graphics::init())
 	{
-		Log::error("Failed to initialize Graphics module");
-		return false;
+		Internal::renderer = Renderer::try_make_renderer(app_config.renderer_type);
+		if (Internal::renderer == nullptr)
+		{
+			Log::error("Renderer module was not found");
+			App::Internal::shutdown();
+			return false;
+		}
+
+		if (!Internal::renderer->init())
+		{
+			Log::error("Failed to initialize Renderer module");
+			App::Internal::shutdown();
+			return false;
+		}
 	}
 
-	// input
-	Input::init();
+	// apply default flags
+	Internal::platform->set_app_flags(app_flags);
+	Internal::renderer->set_app_flags(app_flags);
 
-	// prepare by updating input & platform once
-	Input::update_state();
-	Platform::update(Input::state);
+	// input + poll the platform once
+	Input::Internal::init();
+	Input::Internal::step_state();
+	Internal::platform->update(Input::state);
 
 	// startup
 	if (app_config.on_startup != nullptr)
 		app_config.on_startup();
-
-	time_last = Platform::ticks();
-	time_accumulator = 0;
+	app_time_last = Internal::platform->ticks();
+	app_time_accumulator = 0;
 
 	// display window
-	Platform::ready();
+	Internal::platform->ready();
 
 	// Begin main loop
-	// Emscripten requires the main loop be separated into its own call
-
 #ifdef __EMSCRIPTEN__
-	emscripten_set_main_loop(app_iterate, 0, 1);
+	emscripten_set_main_loop(App::Internal::iterate, 0, 1);
 #else
 	while (!app_is_exiting)
-		app_iterate();
+		App::Internal::iterate();
 #endif
 
 	// shutdown
 	if (app_config.on_shutdown != nullptr)
 		app_config.on_shutdown();
+	App::Internal::shutdown();
+	return true;
+}
 
-	Graphics::shutdown();
-	Platform::shutdown();
+bool App::is_running()
+{
+	return app_is_running;
+}
 
-	// clear static state
+void App::Internal::iterate()
+{
+	static const auto step = []()
+	{
+		Input::Internal::step_state();
+		platform->update(Input::state);
+		Input::Internal::update_bindings();
+		renderer->update();
+		if (app_config.on_update != nullptr)
+			app_config.on_update();
+	};
+
+	bool is_fixed_timestep = get_flag(Flags::FixedTimestep);
+
+	// Update in Fixed Timestep
+	if (is_fixed_timestep)
+	{
+		u64 time_target = (u64)((1.0 / app_config.target_framerate) * Time::ticks_per_second);
+		u64 ticks_curr = App::Internal::platform->ticks();
+		u64 ticks_diff = ticks_curr - app_time_last;
+		app_time_last = ticks_curr;
+		app_time_accumulator += ticks_diff;
+
+		// do not let us run too fast
+		while (app_time_accumulator < time_target)
+		{
+			int milliseconds = (int)(time_target - app_time_accumulator) / (Time::ticks_per_second / 1000);
+			App::Internal::platform->sleep(milliseconds);
+
+			ticks_curr = App::Internal::platform->ticks();
+			ticks_diff = ticks_curr - app_time_last;
+			app_time_last = ticks_curr;
+			app_time_accumulator += ticks_diff;
+		}
+
+		// Do not allow us to fall behind too many updates
+		// (otherwise we'll get spiral of death)
+		u64 time_maximum = app_config.max_updates * time_target;
+		if (app_time_accumulator > time_maximum)
+			app_time_accumulator = time_maximum;
+
+		// do as many updates as we can
+		while (app_time_accumulator >= time_target)
+		{
+			app_time_accumulator -= time_target;
+
+			Time::delta = (1.0f / app_config.target_framerate);
+
+			if (Time::pause_timer > 0)
+			{
+				Time::pause_timer -= Time::delta;
+				if (Time::pause_timer <= -0.0001)
+					Time::delta = -Time::pause_timer;
+				else
+					continue;
+			}
+
+			Time::previous_ticks = Time::ticks;
+			Time::ticks += time_target;
+			Time::previous_seconds = Time::seconds;
+			Time::seconds += Time::delta;
+
+			step();
+		}
+	}
+	// Update with Variable Timestep
+	else
+	{
+		u64 ticks_curr = App::Internal::platform->ticks();
+		u64 ticks_diff = ticks_curr - app_time_last;
+		app_time_last = ticks_curr;
+		app_time_accumulator += ticks_diff;
+
+		Time::delta = ticks_diff / (float)Time::ticks_per_second;
+
+		if (Time::pause_timer > 0)
+		{
+			Time::pause_timer -= Time::delta;
+		}
+		else
+		{
+			Time::previous_ticks = Time::ticks;
+			Time::ticks += ticks_diff;
+			Time::previous_seconds = Time::seconds;
+			Time::seconds += Time::delta;
+
+			step();
+		}
+	}
+
+	// Draw Frame
+	{
+		renderer->before_render();
+		if (app_config.on_render != nullptr)
+			app_config.on_render();
+		renderer->after_render();
+		platform->present();
+	}
+}
+
+void App::Internal::shutdown()
+{
+	Input::Internal::shutdown();
+
+	if (renderer)
+		renderer->shutdown();
+
+	if (platform)
+		platform->shutdown();
+
+	if (renderer)
+		delete renderer;
+	renderer = nullptr;
+
+	if (platform)
+		delete platform;
+	platform = nullptr;
+
+	// clear static App state
+	app_config = Config();
 	app_is_running = false;
 	app_is_exiting = false;
+	app_time_last = 0;
+	app_time_accumulator = 0;
+	app_backbuffer = TargetRef();
 
+	// clear static Time state
 	Time::ticks = 0;
 	Time::seconds = 0;
 	Time::previous_ticks = 0;
 	Time::previous_seconds = 0;
 	Time::delta = 0;
-
-	return true;
 }
 
 void App::exit()
 {
+	BLAH_ASSERT_RUNNING();
 	if (!app_is_exiting && app_is_running)
 		app_is_exiting = true;
 }
 
 const Config& App::config()
 {
+	BLAH_ASSERT_RUNNING();
 	return app_config;
 }
 
 const char* App::path()
 {
-	return Platform::app_path();
+	BLAH_ASSERT_RUNNING();
+	return Internal::platform->app_path();
 }
 
 const char* App::user_path()
 {
-	return Platform::user_path();
+	BLAH_ASSERT_RUNNING();
+	return Internal::platform->user_path();
 }
 
 const char* App::get_title()
 {
-	return Platform::get_title();
+	BLAH_ASSERT_RUNNING();
+	return Internal::platform->get_title();
 }
 
 void App::set_title(const char* title)
 {
-	Platform::set_title(title);
+	BLAH_ASSERT_RUNNING();
+	Internal::platform->set_title(title);
 }
 
 Point App::get_position()
 {
+	BLAH_ASSERT_RUNNING();
 	Point result;
-	Platform::get_position(&result.x, &result.y);
+	Internal::platform->get_position(&result.x, &result.y);
 	return result;
 }
 
 void App::set_position(Point point)
 {
-	Platform::set_position(point.x, point.y);
+	BLAH_ASSERT_RUNNING();
+	Internal::platform->set_position(point.x, point.y);
 }
 
 Point App::get_size()
 {
+	BLAH_ASSERT_RUNNING();
 	Point result;
-	Platform::get_size(&result.x, &result.y);
+	Internal::platform->get_size(&result.x, &result.y);
 	return result;
 }
 
 void App::set_size(Point point)
 {
-	Platform::set_size(point.x, point.y);
+	BLAH_ASSERT_RUNNING();
+	Internal::platform->set_size(point.x, point.y);
 }
 
-int App::width()
+Point App::get_backbuffer_size()
 {
-	return get_size().x;
-}
-
-int App::height()
-{
-	return get_size().y;
-}
-
-int App::draw_width()
-{
-	int w, h;
-	Platform::get_draw_size(&w, &h);
-	return w;
-}
-
-int App::draw_height()
-{
-	int w, h;
-	Platform::get_draw_size(&w, &h);
-	return h;
+	BLAH_ASSERT_RUNNING();
+	if (Internal::renderer)
+		return Point(app_backbuffer->width(), app_backbuffer->height());
+	return Point(0, 0);
 }
 
 float App::content_scale()
 {
-	return Platform::get_content_scale();
+	BLAH_ASSERT_RUNNING();
+	return Internal::platform->get_content_scale();
 }
 
-void App::fullscreen(bool enabled)
+bool App::focused()
 {
-	Platform::set_fullscreen(enabled);
+	BLAH_ASSERT_RUNNING();
+	return Internal::platform->get_focused();
 }
 
-Renderer App::renderer()
+void App::set_flag(u32 flag, bool enabled)
 {
-	return Graphics::renderer();
-}
+	BLAH_ASSERT_RUNNING();
 
-const RendererFeatures& Blah::App::renderer_features()
-{
-	return Graphics::features();
-}
+	u32 was = app_flags;
 
-namespace
-{
-	// A dummy Frame Buffer that represents the Back Buffer
-	// it doesn't actually contain any textures or details.
-	class BackBuffer final : public Target
+	if (enabled)
+		app_flags |= flag;
+	else
+		app_flags &= ~flag;
+
+	if (was != app_flags)
 	{
-		Attachments empty_textures;
-
-		Attachments& textures() override
-		{
-			BLAH_ASSERT(false, "Backbuffer doesn't have any textures");
-			return empty_textures;
-		}
-
-		const Attachments& textures() const override
-		{
-			BLAH_ASSERT(false, "Backbuffer doesn't have any textures");
-			return empty_textures;
-		}
-
-		int width() const override
-		{
-			return App::draw_width();
-		}
-
-		int height() const override
-		{
-			return App::draw_height();
-		}
-
-		void clear(Color color, float depth, u8 stencil, ClearMask mask) override
-		{
-			Graphics::clear_backbuffer(color, depth, stencil, mask);
-		}
-	};
-
+		Internal::platform->set_app_flags(app_flags);
+		Internal::renderer->set_app_flags(app_flags);
+	}
 }
 
-const TargetRef App::backbuffer = TargetRef(new BackBuffer());
+bool App::get_flag(u32 flag)
+{
+	BLAH_ASSERT_RUNNING();
+	return ((app_flags & flag) == flag);
+}
+
+const RendererInfo& App::renderer()
+{
+	BLAH_ASSERT_RUNNING();
+	BLAH_ASSERT_RENDERER();
+	return Internal::renderer->info;
+}
+
+const TargetRef& App::backbuffer()
+{
+	BLAH_ASSERT_RUNNING();
+	return app_backbuffer;
+}
+
+void System::open_url(const char* url)
+{
+	BLAH_ASSERT_RUNNING();
+	App::Internal::platform->open_url(url);
+}

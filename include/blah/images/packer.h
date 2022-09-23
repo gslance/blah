@@ -1,10 +1,11 @@
 #pragma once
+#include <blah/common.h>
 #include <blah/images/image.h>
-#include <blah/numerics/color.h>
-#include <blah/numerics/spatial.h>
+#include <blah/math/color.h>
+#include <blah/math/spatial.h>
 #include <blah/containers/str.h>
 #include <blah/containers/vector.h>
-#include <blah/streams/bufferstream.h>
+#include <blah/stream.h>
 #include <blah/filesystem.h>
 
 namespace Blah
@@ -69,11 +70,6 @@ namespace Blah
 
 		Packer();
 		Packer(int max_size, int spacing, bool power_of_two);
-		Packer(const Packer&) = delete;
-		Packer& operator=(const Packer&) = delete;
-		Packer(Packer&& src) noexcept;
-		Packer& operator=(Packer&& src) noexcept;
-		~Packer();
 		
 		// add a new entry
 		void add(u64 id, int width, int height, const Color* pixels);
@@ -96,9 +92,6 @@ namespace Blah
 		// clear the current packer data
 		void clear();
 
-		// dispose all resources used by the packer
-		void dispose();
-
 	private:
 		struct Node
 		{
@@ -108,8 +101,8 @@ namespace Blah
 			Node* down;
 
 			Node();
-			Node* Find(int w, int h);
-			Node* Reset(const Recti& rect);
+			Node* find(int w, int h);
+			Node* reset(const Recti& rect);
 		};
 
 		// whether the packer has any changes that require it to run again

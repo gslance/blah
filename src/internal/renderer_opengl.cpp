@@ -1,6 +1,7 @@
-#ifdef BLAH_GRAPHICS_OPENGL
+#ifdef BLAH_RENDERER_OPENGL
 
-#include "graphics.h"
+#include "renderer.h"
+#include "internal.h"
 #include "platform.h"
 #include <blah/common.h>
 #include <stdio.h>
@@ -253,7 +254,7 @@ typedef char             GLchar;
 	GL_FUNC(BindTexture, void, GLenum target, GLuint id) \
 	GL_FUNC(BindRenderbuffer, void, GLenum target, GLuint id) \
 	GL_FUNC(BindFramebuffer, void, GLenum target, GLuint id) \
-	GL_FUNC(TexImage2D, void, GLenum target, GLint level, GLenum internalFormat, GLint width, GLint height, GLint border, GLenum format, GLenum type, void* data) \
+	GL_FUNC(TexImage2D, void, GLenum target, GLint level, GLenum internalFormat, GLint width, GLint height, GLint border, GLenum format, GLenum type, const void* data) \
 	GL_FUNC(FramebufferRenderbuffer, void, GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer) \
 	GL_FUNC(FramebufferTexture2D, void, GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) \
 	GL_FUNC(TexParameteri, void, GLenum target, GLenum name, GLint param) \
@@ -338,14 +339,67 @@ typedef void (APIENTRY* DEBUGPROC)(GLenum source,
 	const GLchar* message,
 	const void* userParam);
 
+// shorthand to our internal state
+#define renderer ((Renderer_OpenGL*)App::Internal::renderer)
+
 namespace Blah
 {
-	struct State
+	const ShaderData opengl_batch_shader_data = {
+		// vertex shader
+#ifdef __EMSCRIPTEN__
+		"#version 300 es\n"
+#else
+		"#version 330\n"
+#endif
+		"uniform mat4 u_matrix;\n"
+		"layout(location=0) in vec2 a_position;\n"
+		"layout(location=1) in vec2 a_tex;\n"
+		"layout(location=2) in vec4 a_color;\n"
+		"layout(location=3) in vec4 a_type;\n"
+		"out vec2 v_tex;\n"
+		"out vec4 v_col;\n"
+		"out vec4 v_type;\n"
+		"void main(void)\n"
+		"{\n"
+		"	gl_Position = u_matrix * vec4(a_position.xy, 0, 1);\n"
+		"	v_tex = a_tex;\n"
+		"	v_col = a_color;\n"
+		"	v_type = a_type;\n"
+		"}",
+
+		// fragment shader
+#ifdef __EMSCRIPTEN__
+		"#version 300 es\n"
+		"precision mediump float;\n"
+#else
+		"#version 330\n"
+#endif
+		"uniform sampler2D u_texture;\n"
+		"in vec2 v_tex;\n"
+		"in vec4 v_col;\n"
+		"in vec4 v_type;\n"
+		"out vec4 o_color;\n"
+		"void main(void)\n"
+		"{\n"
+		"	vec4 color = texture(u_texture, v_tex);\n"
+		"	o_color = \n"
+		"		v_type.x * color * v_col + \n"
+		"		v_type.y * color.a * v_col + \n"
+		"		v_type.z * v_col;\n"
+		"}"
+	};
+
+	class Renderer_OpenGL : public Renderer
 	{
-		// GL function pointers
-		#define GL_FUNC(name, ret, ...) typedef ret (*name ## Func) (__VA_ARGS__); name ## Func name;
-		GL_FUNCTIONS
-		#undef GL_FUNC
+	public:
+
+		struct Bindings
+		{
+			// GL function pointers
+			#define GL_FUNC(name, ret, ...) typedef ret (*name ## Func) (__VA_ARGS__); name ## Func name;
+			GL_FUNCTIONS
+			#undef GL_FUNC
+		} gl;
 
 		// state
 		void* context;
@@ -358,11 +412,19 @@ namespace Blah
 		int max_samples;
 		int max_texture_image_units;
 		int max_texture_size;
-		RendererFeatures features;
-	};
 
-	// static state
-	State gl;
+		bool init() override;
+		void shutdown() override;
+		void update() override;
+		void before_render() override;
+		void after_render() override;
+		void render(const DrawCall& pass) override;
+		void clear_backbuffer(Color color, float depth, u8 stencil, ClearMask mask) override;
+		TextureRef create_texture(int width, int height, TextureFormat format) override;
+		TargetRef create_target(int width, int height, const TextureFormat* attachments, int attachment_count) override;
+		ShaderRef create_shader(const ShaderData* data) override;
+		MeshRef create_mesh() override;
+	};
 
 	// debug callback
 	void APIENTRY gl_message_callback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message, const void* userParam)
@@ -408,7 +470,7 @@ namespace Blah
 	GLuint gl_mesh_assign_attributes(GLuint buffer, GLenum buffer_type, const VertexFormat& format, GLint divisor)
 	{
 		// bind
-		gl.BindBuffer(buffer_type, buffer);
+		renderer->gl.BindBuffer(buffer_type, buffer);
 
 		// TODO: disable existing enabled attributes ..
 		// ...
@@ -485,9 +547,9 @@ namespace Blah
 			}
 
 			u32 location = (u32)(attribute.index);
-			gl.EnableVertexAttribArray(location);
-			gl.VertexAttribPointer(location, components, type, attribute.normalized, format.stride, (void*)ptr);
-			gl.VertexAttribDivisor(location, divisor);
+			renderer->gl.EnableVertexAttribArray(location);
+			renderer->gl.VertexAttribPointer(location, components, type, attribute.normalized, format.stride, (void*)ptr);
+			renderer->gl.VertexAttribDivisor(location, divisor);
 
 			ptr += components * component_size;
 		}
@@ -565,9 +627,9 @@ namespace Blah
 			m_gl_format = GL_RED;
 			m_gl_type = GL_UNSIGNED_BYTE;
 
-			if (width > gl.max_texture_size || height > gl.max_texture_size)
+			if (width > renderer->max_texture_size || height > renderer->max_texture_size)
 			{
-				Log::error("Exceeded Max Texture Size of %i", gl.max_texture_size);
+				Log::error("Exceeded Max Texture Size of %i", renderer->max_texture_size);
 				return;
 			}
 
@@ -601,16 +663,16 @@ namespace Blah
 				return;
 			}
 
-			gl.GenTextures(1, &m_id);
-			gl.ActiveTexture(GL_TEXTURE0);
-			gl.BindTexture(GL_TEXTURE_2D, m_id);
-			gl.TexImage2D(GL_TEXTURE_2D, 0, m_gl_internal_format, width, height, 0, m_gl_format, m_gl_type, nullptr);
+			renderer->gl.GenTextures(1, &m_id);
+			renderer->gl.ActiveTexture(GL_TEXTURE0);
+			renderer->gl.BindTexture(GL_TEXTURE_2D, m_id);
+			renderer->gl.TexImage2D(GL_TEXTURE_2D, 0, m_gl_internal_format, width, height, 0, m_gl_format, m_gl_type, nullptr);
 		}
 
 		~OpenGL_Texture()
 		{
-			if (m_id > 0)
-				gl.DeleteTextures(1, &m_id);
+			if (m_id > 0 && renderer)
+				renderer->gl.DeleteTextures(1, &m_id);
 		}
 
 		GLuint gl_id() const
@@ -639,26 +701,26 @@ namespace Blah
 			{
 				m_sampler = sampler;
 
-				gl.BindTexture(GL_TEXTURE_2D, m_id);
-				gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (m_sampler.filter == TextureFilter::Nearest ? GL_NEAREST : GL_LINEAR));
-				gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (m_sampler.filter == TextureFilter::Nearest ? GL_NEAREST : GL_LINEAR));
-				gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, (m_sampler.wrap_x == TextureWrap::Clamp ? GL_CLAMP_TO_EDGE : GL_REPEAT));
-				gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, (m_sampler.wrap_y == TextureWrap::Clamp ? GL_CLAMP_TO_EDGE : GL_REPEAT));
+				renderer->gl.BindTexture(GL_TEXTURE_2D, m_id);
+				renderer->gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, (m_sampler.filter == TextureFilter::Nearest ? GL_NEAREST : GL_LINEAR));
+				renderer->gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, (m_sampler.filter == TextureFilter::Nearest ? GL_NEAREST : GL_LINEAR));
+				renderer->gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, (m_sampler.wrap_x == TextureWrap::Clamp ? GL_CLAMP_TO_EDGE : GL_REPEAT));
+				renderer->gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, (m_sampler.wrap_y == TextureWrap::Clamp ? GL_CLAMP_TO_EDGE : GL_REPEAT));
 			}
 		}
 
-		virtual void set_data(unsigned char* data) override
+		virtual void set_data(const u8* data) override
 		{
-			gl.ActiveTexture(GL_TEXTURE0);
-			gl.BindTexture(GL_TEXTURE_2D, m_id);
-			gl.TexImage2D(GL_TEXTURE_2D, 0, m_gl_internal_format, m_width, m_height, 0, m_gl_format, m_gl_type, data);
+			renderer->gl.ActiveTexture(GL_TEXTURE0);
+			renderer->gl.BindTexture(GL_TEXTURE_2D, m_id);
+			renderer->gl.TexImage2D(GL_TEXTURE_2D, 0, m_gl_internal_format, m_width, m_height, 0, m_gl_format, m_gl_type, data);
 		}
 
-		virtual void get_data(unsigned char* data) override
+		virtual void get_data(u8* data) override
 		{
-			gl.ActiveTexture(GL_TEXTURE0);
-			gl.BindTexture(GL_TEXTURE_2D, m_id);
-			gl.GetTexImage(GL_TEXTURE_2D, 0, m_gl_internal_format, m_gl_type, data);
+			renderer->gl.ActiveTexture(GL_TEXTURE0);
+			renderer->gl.BindTexture(GL_TEXTURE_2D, m_id);
+			renderer->gl.GetTexImage(GL_TEXTURE_2D, 0, m_gl_internal_format, m_gl_type, data);
 		}
 
 		virtual bool is_framebuffer() const override
@@ -680,11 +742,11 @@ namespace Blah
 
 		OpenGL_Target(int width, int height, const TextureFormat* attachments, int attachmentCount)
 		{
-			gl.GenFramebuffers(1, &m_id);
+			renderer->gl.GenFramebuffers(1, &m_id);
 			m_width = width;
 			m_height = height;
 
-			gl.BindFramebuffer(GL_FRAMEBUFFER, m_id);
+			renderer->gl.BindFramebuffer(GL_FRAMEBUFFER, m_id);
 
 			for (int i = 0; i < attachmentCount; i++)
 			{
@@ -696,20 +758,20 @@ namespace Blah
 
 				if (attachments[i] != TextureFormat::DepthStencil)
 				{
-					gl.FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_2D, gltex->gl_id(), 0);
+					renderer->gl.FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_2D, gltex->gl_id(), 0);
 				}
 				else
 				{
-					gl.FramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, gltex->gl_id(), 0);
+					renderer->gl.FramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, gltex->gl_id(), 0);
 				}
 			}
 		}
 
 		~OpenGL_Target()
 		{
-			if (m_id > 0)
+			if (m_id > 0 && renderer)
 			{
-				gl.DeleteFramebuffers(1, &m_id);
+				renderer->gl.DeleteFramebuffers(1, &m_id);
 				m_id = 0;
 			}
 		}
@@ -731,22 +793,33 @@ namespace Blah
 
 		virtual void clear(Color color, float depth, u8 stencil, ClearMask mask) override
 		{
+			renderer->gl.BindFramebuffer(GL_FRAMEBUFFER, m_id);
+			renderer->gl.Disable(GL_SCISSOR_TEST);
+
 			int clear = 0;
 
 			if (((int)mask & (int)ClearMask::Color) == (int)ClearMask::Color)
+			{
 				clear |= GL_COLOR_BUFFER_BIT;
+				renderer->gl.ColorMask(true, true, true, true);
+				renderer->gl.ClearColor(color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f);
+			}
+			
 			if (((int)mask & (int)ClearMask::Depth) == (int)ClearMask::Depth)
+			{
 				clear |= GL_DEPTH_BUFFER_BIT;
-			if (((int)mask & (int)ClearMask::Stencil) == (int)ClearMask::Stencil)
-				clear |= GL_STENCIL_BUFFER_BIT;
+				if (renderer->gl.ClearDepth)
+					renderer->gl.ClearDepth(depth);
+			}
 
-			gl.BindFramebuffer(GL_FRAMEBUFFER, m_id);
-			gl.Disable(GL_SCISSOR_TEST);
-			gl.ColorMask(true, true, true, true);
-			gl.ClearColor(color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f);
-			gl.ClearDepth(depth);
-			gl.ClearStencil(stencil);
-			gl.Clear(clear);
+			if (((int)mask & (int)ClearMask::Stencil) == (int)ClearMask::Stencil)
+			{
+				clear |= GL_STENCIL_BUFFER_BIT;
+				if (renderer->gl.ClearStencil)
+					renderer->gl.ClearStencil(stencil);
+			}
+
+			renderer->gl.Clear(clear);
 		}
 	};
 
@@ -775,50 +848,50 @@ namespace Blah
 				return;
 			}
 
-			GLchar log[1024];
+			GLchar log[1024] = { 0 };
 			GLsizei log_length = 0;
 
-			GLuint vertex_shader = gl.CreateShader(GL_VERTEX_SHADER);
+			GLuint vertex_shader = renderer->gl.CreateShader(GL_VERTEX_SHADER);
 			{
 				const GLchar* source = (const GLchar*)data->vertex.cstr();
-				gl.ShaderSource(vertex_shader, 1, &source, nullptr);
-				gl.CompileShader(vertex_shader);
-				gl.GetShaderInfoLog(vertex_shader, 1024, &log_length, log);
+				renderer->gl.ShaderSource(vertex_shader, 1, &source, nullptr);
+				renderer->gl.CompileShader(vertex_shader);
+				renderer->gl.GetShaderInfoLog(vertex_shader, 1024, &log_length, log);
 
 				if (log_length > 0)
 				{
-					gl.DeleteShader(vertex_shader);
+					renderer->gl.DeleteShader(vertex_shader);
 					Log::error(log);
 					return;
 				}
 			}
 
-			GLuint fragment_shader = gl.CreateShader(GL_FRAGMENT_SHADER);
+			GLuint fragment_shader = renderer->gl.CreateShader(GL_FRAGMENT_SHADER);
 			{
 				const GLchar* source = (const GLchar*)data->fragment.cstr();
-				gl.ShaderSource(fragment_shader, 1, &source, nullptr);
-				gl.CompileShader(fragment_shader);
-				gl.GetShaderInfoLog(fragment_shader, 1024, &log_length, log);
+				renderer->gl.ShaderSource(fragment_shader, 1, &source, nullptr);
+				renderer->gl.CompileShader(fragment_shader);
+				renderer->gl.GetShaderInfoLog(fragment_shader, 1024, &log_length, log);
 
 				if (log_length > 0)
 				{
-					gl.DeleteShader(vertex_shader);
-					gl.DeleteShader(fragment_shader);
+					renderer->gl.DeleteShader(vertex_shader);
+					renderer->gl.DeleteShader(fragment_shader);
 					Log::error(log);
 					return;
 				}
 			}
 
 			// create actual shader program
-			GLuint id = gl.CreateProgram();
-			gl.AttachShader(id, vertex_shader);
-			gl.AttachShader(id, fragment_shader);
-			gl.LinkProgram(id);
-			gl.GetProgramInfoLog(id, 1024, &log_length, log);
-			gl.DetachShader(id, vertex_shader);
-			gl.DetachShader(id, fragment_shader);
-			gl.DeleteShader(vertex_shader);
-			gl.DeleteShader(fragment_shader);
+			GLuint id = renderer->gl.CreateProgram();
+			renderer->gl.AttachShader(id, vertex_shader);
+			renderer->gl.AttachShader(id, fragment_shader);
+			renderer->gl.LinkProgram(id);
+			renderer->gl.GetProgramInfoLog(id, 1024, &log_length, log);
+			renderer->gl.DetachShader(id, vertex_shader);
+			renderer->gl.DetachShader(id, fragment_shader);
+			renderer->gl.DeleteShader(vertex_shader);
+			renderer->gl.DeleteShader(fragment_shader);
 
 			if (log_length > 0)
 			{
@@ -832,16 +905,17 @@ namespace Blah
 				const int max_name_length = 256;
 
 				GLint active_uniforms = 0;
-				gl.GetProgramiv(id, GL_ACTIVE_UNIFORMS, &active_uniforms);
+				GLint sampler_uniforms = 0;
+				renderer->gl.GetProgramiv(id, GL_ACTIVE_UNIFORMS, &active_uniforms);
 
 				for (int i = 0; i < active_uniforms; i++)
 				{
 					GLsizei length;
 					GLsizei size;
 					GLenum type;
-					GLchar name[max_name_length + 1];
+					GLchar name[max_name_length + 1] = { 0 };
 
-					gl.GetActiveUniform(id, i, max_name_length, &length, &size, &type, name);
+					renderer->gl.GetActiveUniform(id, i, max_name_length, &length, &size, &type, name);
 					name[length] = '\0';
 
 					// array names end with "[0]", and we don't want that
@@ -859,30 +933,35 @@ namespace Blah
 					{
 						UniformInfo tex_uniform;
 						tex_uniform.name = name;
+						tex_uniform.register_index = sampler_uniforms;
 						tex_uniform.buffer_index = 0;
 						tex_uniform.array_length = size;
 						tex_uniform.type = UniformType::Texture2D;
 						tex_uniform.shader = ShaderType::Fragment;
-						uniform_locations.push_back(gl.GetUniformLocation(id, name));
+						uniform_locations.push_back(renderer->gl.GetUniformLocation(id, name));
 						m_uniforms.push_back(tex_uniform);
 
 						UniformInfo sampler_uniform;
 						sampler_uniform.name = String(name).append("_sampler");
+						sampler_uniform.register_index = sampler_uniforms;
 						sampler_uniform.buffer_index = 0;
 						sampler_uniform.array_length = size;
 						sampler_uniform.type = UniformType::Sampler2D;
 						sampler_uniform.shader = ShaderType::Fragment;
-						uniform_locations.push_back(gl.GetUniformLocation(id, name));
+						uniform_locations.push_back(renderer->gl.GetUniformLocation(id, name));
 						m_uniforms.push_back(sampler_uniform);
+
+						sampler_uniforms += size;
 					}
 					else
 					{
 						UniformInfo uniform;
 						uniform.name = name;
 						uniform.type = UniformType::None;
+						uniform.register_index = 0;
 						uniform.buffer_index = 0;
 						uniform.array_length = size;
-						uniform_locations.push_back(gl.GetUniformLocation(id, name));
+						uniform_locations.push_back(renderer->gl.GetUniformLocation(id, name));
 						uniform.shader = (ShaderType)((int)ShaderType::Vertex | (int)ShaderType::Fragment);
 
 						if (type == GL_FLOAT)
@@ -912,15 +991,15 @@ namespace Blah
 
 			// assign ID if the uniforms were valid
 			if (!valid_uniforms)
-				gl.DeleteProgram(id);
+				renderer->gl.DeleteProgram(id);
 			else
 				m_id = id;
 		}
 
 		~OpenGL_Shader()
 		{
-			if (m_id > 0)
-				gl.DeleteProgram(m_id);
+			if (m_id > 0 && renderer)
+				renderer->gl.DeleteProgram(m_id);
 			m_id = 0;
 		}
 
@@ -975,19 +1054,22 @@ namespace Blah
 			m_vertex_attribs_enabled = 0;
 			m_instance_attribs_enabled = 0;
 
-			gl.GenVertexArrays(1, &m_id);
+			renderer->gl.GenVertexArrays(1, &m_id);
 		}
 
 		~OpenGL_Mesh()
 		{
-			if (m_vertex_buffer != 0)
-				gl.DeleteBuffers(1, &m_vertex_buffer);
-			if (m_index_buffer != 0)
-				gl.DeleteBuffers(1, &m_index_buffer);
-			if (m_instance_buffer != 0)
-				gl.DeleteBuffers(1, &m_instance_buffer);
-			if (m_id != 0)
-				gl.DeleteVertexArrays(1, &m_id);
+			if (renderer)
+			{
+				if (m_vertex_buffer != 0)
+					renderer->gl.DeleteBuffers(1, &m_vertex_buffer);
+				if (m_index_buffer != 0)
+					renderer->gl.DeleteBuffers(1, &m_index_buffer);
+				if (m_instance_buffer != 0)
+					renderer->gl.DeleteBuffers(1, &m_instance_buffer);
+				if (m_id != 0)
+					renderer->gl.DeleteVertexArrays(1, &m_id);
+			}
 			m_id = 0;
 		}
 
@@ -1010,10 +1092,10 @@ namespace Blah
 		{
 			m_index_count = count;
 
-			gl.BindVertexArray(m_id);
+			renderer->gl.BindVertexArray(m_id);
 			{
 				if (m_index_buffer == 0)
-					gl.GenBuffers(1, &(m_index_buffer));
+					renderer->gl.GenBuffers(1, &(m_index_buffer));
 
 				switch (format)
 				{
@@ -1027,52 +1109,52 @@ namespace Blah
 					break;
 				}
 
-				gl.BindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_index_buffer);
-				gl.BufferData(GL_ELEMENT_ARRAY_BUFFER, m_index_size * count, indices, GL_DYNAMIC_DRAW);
+				renderer->gl.BindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_index_buffer);
+				renderer->gl.BufferData(GL_ELEMENT_ARRAY_BUFFER, m_index_size * count, indices, GL_DYNAMIC_DRAW);
 			}
-			gl.BindVertexArray(0);
+			renderer->gl.BindVertexArray(0);
 		}
 
 		virtual void vertex_data(const VertexFormat& format, const void* vertices, i64 count) override
 		{
 			m_vertex_count = count;
 
-			gl.BindVertexArray(m_id);
+			renderer->gl.BindVertexArray(m_id);
 			{
 				// Create Buffer if it doesn't exist yet
 				if (m_vertex_buffer == 0)
-					gl.GenBuffers(1, &(m_vertex_buffer));
+					renderer->gl.GenBuffers(1, &(m_vertex_buffer));
 
 				// TODO:
 				// Cache this
 				m_vertex_size = gl_mesh_assign_attributes(m_vertex_buffer, GL_ARRAY_BUFFER, format, 0);
 
 				// Upload Buffer
-				gl.BindBuffer(GL_ARRAY_BUFFER, m_vertex_buffer);
-				gl.BufferData(GL_ARRAY_BUFFER, m_vertex_size * count, vertices, GL_DYNAMIC_DRAW);
+				renderer->gl.BindBuffer(GL_ARRAY_BUFFER, m_vertex_buffer);
+				renderer->gl.BufferData(GL_ARRAY_BUFFER, m_vertex_size * count, vertices, GL_DYNAMIC_DRAW);
 			}
-			gl.BindVertexArray(0);
+			renderer->gl.BindVertexArray(0);
 		}
 
 		virtual void instance_data(const VertexFormat& format, const void* instances, i64 count) override
 		{
 			m_instance_count = count;
 
-			gl.BindVertexArray(m_id);
+			renderer->gl.BindVertexArray(m_id);
 			{
 				// Create Buffer if it doesn't exist yet
 				if (m_instance_buffer == 0)
-					gl.GenBuffers(1, &(m_instance_buffer));
+					renderer->gl.GenBuffers(1, &(m_instance_buffer));
 
 				// TODO:
 				// Cache this
 				m_instance_size = gl_mesh_assign_attributes(m_instance_buffer, GL_ARRAY_BUFFER, format, 1);
 
 				// Upload Buffer
-				gl.BindBuffer(GL_ARRAY_BUFFER, m_instance_buffer);
-				gl.BufferData(GL_ARRAY_BUFFER, m_instance_size * count, instances, GL_DYNAMIC_DRAW);
+				renderer->gl.BindBuffer(GL_ARRAY_BUFFER, m_instance_buffer);
+				renderer->gl.BufferData(GL_ARRAY_BUFFER, m_instance_size * count, instances, GL_DYNAMIC_DRAW);
 			}
-			gl.BindVertexArray(0);
+			renderer->gl.BindVertexArray(0);
 		}
 
 		virtual i64 index_count() const override
@@ -1091,21 +1173,19 @@ namespace Blah
 		}
 	};
 
-	bool Graphics::init()
+	bool Renderer_OpenGL::init()
 	{
-		gl = State();
-
 		// create gl context
-		gl.context = Platform::gl_context_create();
-		if (gl.context == nullptr)
+		context = App::Internal::platform->gl_context_create();
+		if (context == nullptr)
 		{
 			Log::error("Failed to create OpenGL Context");
 			return false;
 		}
-		Platform::gl_context_make_current(gl.context);
+		App::Internal::platform->gl_context_make_current(context);
 
 		// bind opengl functions
-		#define GL_FUNC(name, ...) gl.name = (State::name ## Func)(Platform::gl_get_func("gl" #name));
+		#define GL_FUNC(name, ...) gl.name = (Renderer_OpenGL::Bindings::name ## Func)(App::Internal::platform->gl_get_func("gl" #name));
 		GL_FUNCTIONS
 		#undef GL_FUNC
 
@@ -1118,13 +1198,13 @@ namespace Blah
 		}
 
 		// get opengl info
-		gl.GetIntegerv(0x8CDF, &gl.max_color_attachments);
-		gl.GetIntegerv(0x80E9, &gl.max_element_indices);
-		gl.GetIntegerv(0x80E8, &gl.max_element_vertices);
-		gl.GetIntegerv(0x84E8, &gl.max_renderbuffer_size);
-		gl.GetIntegerv(0x8D57, &gl.max_samples);
-		gl.GetIntegerv(0x8872, &gl.max_texture_image_units);
-		gl.GetIntegerv(0x0D33, &gl.max_texture_size);
+		gl.GetIntegerv(0x8CDF, &max_color_attachments);
+		gl.GetIntegerv(0x80E9, &max_element_indices);
+		gl.GetIntegerv(0x80E8, &max_element_vertices);
+		gl.GetIntegerv(0x84E8, &max_renderbuffer_size);
+		gl.GetIntegerv(0x8D57, &max_samples);
+		gl.GetIntegerv(0x8872, &max_texture_image_units);
+		gl.GetIntegerv(0x0D33, &max_texture_size);
 
 		// log
 		Log::info("OpenGL %s, %s",
@@ -1136,34 +1216,28 @@ namespace Blah
 		gl.PixelStorei(GL_UNPACK_ALIGNMENT, 1);
 
 		// assign info
-		gl.features.instancing = true;
-		gl.features.origin_bottom_left = true;
-		gl.features.max_texture_size = gl.max_texture_size;
+		info.type = RendererType::OpenGL;
+		info.instancing = true;
+		info.origin_bottom_left = true;
+		info.max_texture_size = max_texture_size;
+
+		// create the default batch shader
+		default_batcher_shader = Shader::create(opengl_batch_shader_data);
 
 		return true;
 	}
 
-	Renderer Graphics::renderer()
+	void Renderer_OpenGL::shutdown()
 	{
-		return Renderer::OpenGL;
+		App::Internal::platform->gl_context_destroy(context);
+		context = nullptr;
 	}
 
-	void Graphics::shutdown()
-	{
-		Platform::gl_context_destroy(gl.context);
-		gl.context = nullptr;
-	}
+	void Renderer_OpenGL::update() {}
+	void Renderer_OpenGL::before_render() {}
+	void Renderer_OpenGL::after_render() {}
 
-	const RendererFeatures& Graphics::features()
-	{
-		return gl.features;
-	}
-
-	void Graphics::update() {}
-	void Graphics::before_render() {}
-	void Graphics::after_render() {}
-
-	TextureRef Graphics::create_texture(int width, int height, TextureFormat format)
+	TextureRef Renderer_OpenGL::create_texture(int width, int height, TextureFormat format)
 	{
 		auto resource = new OpenGL_Texture(width, height, format);
 
@@ -1176,7 +1250,7 @@ namespace Blah
 		return TextureRef(resource);
 	}
 
-	TargetRef Graphics::create_target(int width, int height, const TextureFormat* attachments, int attachmentCount)
+	TargetRef Renderer_OpenGL::create_target(int width, int height, const TextureFormat* attachments, int attachmentCount)
 	{
 		auto resource = new OpenGL_Target(width, height, attachments, attachmentCount);
 
@@ -1189,7 +1263,7 @@ namespace Blah
 		return TargetRef(resource);
 	}
 
-	ShaderRef Graphics::create_shader(const ShaderData* data)
+	ShaderRef Renderer_OpenGL::create_shader(const ShaderData* data)
 	{
 		auto resource = new OpenGL_Shader(data);
 
@@ -1202,7 +1276,7 @@ namespace Blah
 		return ShaderRef(resource);
 	}
 
-	MeshRef Graphics::create_mesh()
+	MeshRef Renderer_OpenGL::create_mesh()
 	{
 		auto resource = new OpenGL_Mesh();
 
@@ -1215,24 +1289,20 @@ namespace Blah
 		return MeshRef(resource);
 	}
 
-	void Graphics::render(const RenderPass& pass)
+	void Renderer_OpenGL::render(const DrawCall& pass)
 	{
 		// Bind the Target
-		Point size;
-		if (pass.target == App::backbuffer)
+		if (pass.target == App::backbuffer())
 		{
-			gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
-			size.x = App::draw_width();
-			size.y = App::draw_height();
+			renderer->gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
 		}
 		else if (pass.target)
 		{
 			auto framebuffer = (OpenGL_Target*)pass.target.get();
-			gl.BindFramebuffer(GL_FRAMEBUFFER, framebuffer->gl_id());
-			size.x = pass.target->width();
-			size.y = pass.target->height();
+			renderer->gl.BindFramebuffer(GL_FRAMEBUFFER, framebuffer->gl_id());
 		}
 
+		auto size = Point(pass.target->width(), pass.target->height());
 		auto shader_ref = pass.material->shader();
 		auto shader = (OpenGL_Shader*)shader_ref.get();
 		auto mesh = (OpenGL_Mesh*)pass.mesh.get();
@@ -1241,10 +1311,9 @@ namespace Blah
 		// TODO: I don't love how material values are assigned or set here
 		// TODO: this should be cached?
 		{
-			gl.UseProgram(shader->gl_id());
+			renderer->gl.UseProgram(shader->gl_id());
 
 			int texture_slot = 0;
-			int gl_texture_slot = 0;
 			GLint texture_ids[64];
 			auto& uniforms = shader->uniforms();
 			auto data = pass.material->data();
@@ -1263,65 +1332,64 @@ namespace Blah
 				{
 					for (int n = 0; n < uniform.array_length; n++)
 					{
-						auto tex = pass.material->get_texture(texture_slot, n);
-						auto sampler = pass.material->get_sampler(texture_slot, n);
+						auto tex = pass.material->get_texture(texture_slot);
+						auto sampler = pass.material->get_sampler(texture_slot);
 
-						gl.ActiveTexture(GL_TEXTURE0 + gl_texture_slot);
+						renderer->gl.ActiveTexture(GL_TEXTURE0 + texture_slot);
 
 						if (!tex)
 						{
-							gl.BindTexture(GL_TEXTURE_2D, 0);
+							renderer->gl.BindTexture(GL_TEXTURE_2D, 0);
 						}
 						else
 						{
 							auto gl_tex = ((OpenGL_Texture*)tex.get());
 							gl_tex->update_sampler(sampler);
-							gl.BindTexture(GL_TEXTURE_2D, gl_tex->gl_id());
+							renderer->gl.BindTexture(GL_TEXTURE_2D, gl_tex->gl_id());
 						}
 
-						texture_ids[n] = gl_texture_slot;
-						gl_texture_slot++;
+						texture_ids[n] = texture_slot;
+						texture_slot++;
 					}
 
-					gl.Uniform1iv(location, (GLint)uniform.array_length, &texture_ids[0]);
-					texture_slot++;
+					renderer->gl.Uniform1iv(location, (GLint)uniform.array_length, &texture_ids[0]);
 					continue;
 				}
 
 				// Float
 				if (uniform.type == UniformType::Float)
 				{
-					gl.Uniform1fv(location, (GLint)uniform.array_length, data);
+					renderer->gl.Uniform1fv(location, (GLint)uniform.array_length, data);
 					data += uniform.array_length;
 				}
 				// Float2
 				else if (uniform.type == UniformType::Float2)
 				{
-					gl.Uniform2fv(location, (GLint)uniform.array_length, data);
+					renderer->gl.Uniform2fv(location, (GLint)uniform.array_length, data);
 					data += 2 * uniform.array_length;
 				}
 				// Float3
 				else if (uniform.type == UniformType::Float3)
 				{
-					gl.Uniform3fv(location, (GLint)uniform.array_length, data);
+					renderer->gl.Uniform3fv(location, (GLint)uniform.array_length, data);
 					data += 3 * uniform.array_length;
 				}
 				// Float4
 				else if (uniform.type == UniformType::Float4)
 				{
-					gl.Uniform4fv(location, (GLint)uniform.array_length, data);
+					renderer->gl.Uniform4fv(location, (GLint)uniform.array_length, data);
 					data += 4 * uniform.array_length;
 				}
 				// Matrix3x2
 				else if (uniform.type == UniformType::Mat3x2)
 				{
-					gl.UniformMatrix3x2fv(location, (GLint)uniform.array_length, 0, data);
+					renderer->gl.UniformMatrix3x2fv(location, (GLint)uniform.array_length, 0, data);
 					data += 6 * uniform.array_length;
 				}
 				// Matrix4x4
 				else if (uniform.type == UniformType::Mat4x4)
 				{
-					gl.UniformMatrix4fv(location, (GLint)uniform.array_length, 0, data);
+					renderer->gl.UniformMatrix4fv(location, (GLint)uniform.array_length, 0, data);
 					data += 16 * uniform.array_length;
 				}
 			}
@@ -1336,11 +1404,11 @@ namespace Blah
 			GLenum alphaSrc = gl_get_blend_factor(pass.blend.alpha_src);
 			GLenum alphaDst = gl_get_blend_factor(pass.blend.alpha_dst);
 
-			gl.Enable(GL_BLEND);
-			gl.BlendEquationSeparate(colorOp, alphaOp);
-			gl.BlendFuncSeparate(colorSrc, colorDst, alphaSrc, alphaDst);
+			renderer->gl.Enable(GL_BLEND);
+			renderer->gl.BlendEquationSeparate(colorOp, alphaOp);
+			renderer->gl.BlendFuncSeparate(colorSrc, colorDst, alphaSrc, alphaDst);
 
-			gl.ColorMask(
+			renderer->gl.ColorMask(
 				((int)pass.blend.mask & (int)BlendMask::Red),
 				((int)pass.blend.mask & (int)BlendMask::Green),
 				((int)pass.blend.mask & (int)BlendMask::Blue),
@@ -1351,7 +1419,7 @@ namespace Blah
 			unsigned char b = pass.blend.rgba >> 8;
 			unsigned char a = pass.blend.rgba;
 
-			gl.BlendColor(
+			renderer->gl.BlendColor(
 				r / 255.0f,
 				g / 255.0f,
 				b / 255.0f,
@@ -1362,38 +1430,38 @@ namespace Blah
 		{
 			if (pass.depth == Compare::None)
 			{
-				gl.Disable(GL_DEPTH_TEST);
+				renderer->gl.Disable(GL_DEPTH_TEST);
 			}
 			else
 			{
-				gl.Enable(GL_DEPTH_TEST);
+				renderer->gl.Enable(GL_DEPTH_TEST);
 
 				switch (pass.depth)
 				{
 				case Compare::None: break;
 				case Compare::Always:
-					gl.DepthFunc(GL_ALWAYS);
+					renderer->gl.DepthFunc(GL_ALWAYS);
 					break;
 				case Compare::Equal:
-					gl.DepthFunc(GL_EQUAL);
+					renderer->gl.DepthFunc(GL_EQUAL);
 					break;
 				case Compare::Greater:
-					gl.DepthFunc(GL_GREATER);
+					renderer->gl.DepthFunc(GL_GREATER);
 					break;
 				case Compare::GreatorOrEqual:
-					gl.DepthFunc(GL_GEQUAL);
+					renderer->gl.DepthFunc(GL_GEQUAL);
 					break;
 				case Compare::Less:
-					gl.DepthFunc(GL_LESS);
+					renderer->gl.DepthFunc(GL_LESS);
 					break;
 				case Compare::LessOrEqual:
-					gl.DepthFunc(GL_LEQUAL);
+					renderer->gl.DepthFunc(GL_LEQUAL);
 					break;
 				case Compare::Never:
-					gl.DepthFunc(GL_NEVER);
+					renderer->gl.DepthFunc(GL_NEVER);
 					break;
 				case Compare::NotEqual:
-					gl.DepthFunc(GL_NOTEQUAL);
+					renderer->gl.DepthFunc(GL_NOTEQUAL);
 					break;
 				}
 			}
@@ -1403,18 +1471,18 @@ namespace Blah
 		{
 			if (pass.cull == Cull::None)
 			{
-				gl.Disable(GL_CULL_FACE);
+				renderer->gl.Disable(GL_CULL_FACE);
 			}
 			else
 			{
-				gl.Enable(GL_CULL_FACE);
+				renderer->gl.Enable(GL_CULL_FACE);
 
 				if (pass.cull == Cull::Back)
-					gl.CullFace(GL_BACK);
+					renderer->gl.CullFace(GL_BACK);
 				else if (pass.cull == Cull::Front)
-					gl.CullFace(GL_FRONT);
+					renderer->gl.CullFace(GL_FRONT);
 				else
-					gl.CullFace(GL_FRONT_AND_BACK);
+					renderer->gl.CullFace(GL_FRONT_AND_BACK);
 			}
 		}
 
@@ -1423,14 +1491,14 @@ namespace Blah
 			Rectf viewport = pass.viewport;
 			viewport.y = size.y - viewport.y - viewport.h;
 
-			gl.Viewport((GLint)viewport.x, (GLint)viewport.y, (GLint)viewport.w, (GLint)viewport.h);
+			renderer->gl.Viewport((GLint)viewport.x, (GLint)viewport.y, (GLint)viewport.w, (GLint)viewport.h);
 		}
 
 		// Scissor
 		{
 			if (!pass.has_scissor)
 			{
-				gl.Disable(GL_SCISSOR_TEST);
+				renderer->gl.Disable(GL_SCISSOR_TEST);
 			}
 			else
 			{
@@ -1442,21 +1510,21 @@ namespace Blah
 				if (scissor.h < 0)
 					scissor.h = 0;
 
-				gl.Enable(GL_SCISSOR_TEST);
-				gl.Scissor((GLint)scissor.x, (GLint)scissor.y, (GLint)scissor.w, (GLint)scissor.h);
+				renderer->gl.Enable(GL_SCISSOR_TEST);
+				renderer->gl.Scissor((GLint)scissor.x, (GLint)scissor.y, (GLint)scissor.w, (GLint)scissor.h);
 			}
 		}
 
 		// Draw the Mesh
 		{
-			gl.BindVertexArray(mesh->gl_id());
+			renderer->gl.BindVertexArray(mesh->gl_id());
 
 			GLenum index_format = mesh->gl_index_format();
 			int index_size = mesh->gl_index_size();
 
 			if (pass.instance_count > 0)
 			{
-				gl.DrawElementsInstanced(
+				renderer->gl.DrawElementsInstanced(
 					GL_TRIANGLES,
 					(GLint)(pass.index_count),
 					index_format,
@@ -1465,36 +1533,62 @@ namespace Blah
 			}
 			else
 			{
-				gl.DrawElements(
+				renderer->gl.DrawElements(
 					GL_TRIANGLES,
 					(GLint)(pass.index_count),
 					index_format,
 					(void*)(index_size * pass.index_start));
 			}
 
-			gl.BindVertexArray(0);
+			renderer->gl.BindVertexArray(0);
 		}
 	}
 
-	void Graphics::clear_backbuffer(Color color, float depth, u8 stencil, ClearMask mask)
+	void Renderer_OpenGL::clear_backbuffer(Color color, float depth, u8 stencil, ClearMask mask)
 	{
-		int clear = 0;
+			renderer->gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
+			renderer->gl.Disable(GL_SCISSOR_TEST);
 
-		if (((int)mask & (int)ClearMask::Color) == (int)ClearMask::Color)
-			clear |= GL_COLOR_BUFFER_BIT;
-		if (((int)mask & (int)ClearMask::Depth) == (int)ClearMask::Depth)
-			clear |= GL_DEPTH_BUFFER_BIT;
-		if (((int)mask & (int)ClearMask::Stencil) == (int)ClearMask::Stencil)
-			clear |= GL_STENCIL_BUFFER_BIT;
+			int clear = 0;
 
-		gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
-		gl.Disable(GL_SCISSOR_TEST);
-		gl.ColorMask(true, true, true, true);
-		gl.ClearColor(color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f);
-		gl.ClearDepth(depth);
-		gl.ClearStencil(stencil);
-		gl.Clear(clear);
+			if (((int)mask & (int)ClearMask::Color) == (int)ClearMask::Color)
+			{
+				clear |= GL_COLOR_BUFFER_BIT;
+				renderer->gl.ColorMask(true, true, true, true);
+				renderer->gl.ClearColor(color.r / 255.0f, color.g / 255.0f, color.b / 255.0f, color.a / 255.0f);
+			}
+			
+			if (((int)mask & (int)ClearMask::Depth) == (int)ClearMask::Depth)
+			{
+				clear |= GL_DEPTH_BUFFER_BIT;
+				if (renderer->gl.ClearDepth)
+					renderer->gl.ClearDepth(depth);
+			}
+
+			if (((int)mask & (int)ClearMask::Stencil) == (int)ClearMask::Stencil)
+			{
+				clear |= GL_STENCIL_BUFFER_BIT;
+				if (renderer->gl.ClearStencil)
+					renderer->gl.ClearStencil(stencil);
+			}
+
+			renderer->gl.Clear(clear);
 	}
 }
 
-#endif // BLAH_GRAPHICS_OPENGL
+Blah::Renderer* Blah::Renderer::try_make_opengl()
+{
+	return new Blah::Renderer_OpenGL();
+}
+
+#else // BLAH_RENDERER_OPENGL
+
+#include "renderer.h"
+Blah::Renderer* Blah::Renderer::try_make_opengl()
+{
+	return nullptr;
+}
+
+#endif
+
+
